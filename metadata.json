@@ -1,6 +1,6 @@
 {
   "name": "EasyX",
   "description": "High-yield investment and wealth management platform with tiered investment plans, promotional media carousel, wallet management, referral system, admin controls, smart automated reminder notifications, support ticketing, AI Support Assistant, SLA tracking, user activity observability, error monitoring, and automated database backup & recovery system.",
-  "requestFramePermissions": ["camera"],
+  "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

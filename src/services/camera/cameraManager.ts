@@ -47,15 +47,16 @@ class CameraManager {
   private permissionListeners = new Set<(state: "granted" | "denied" | "prompt") => void>();
 
   constructor() {
-    this.initPermissionWatcher();
+    // Deliberately empty: zero queries, listeners, or actions on app load or module import.
+    // Permission checks and camera requests happen strictly after explicit user actions.
   }
 
   /**
-   * Initializes non-intrusive permission status listener if supported by browser.
+   * Initializes non-intrusive permission status listener lazily only when requested.
    * Never prompts the user.
    */
   private async initPermissionWatcher() {
-    if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+    if (this.permissionStatusObj || typeof navigator === "undefined" || !navigator.permissions?.query) {
       return;
     }
     try {
@@ -89,6 +90,7 @@ class CameraManager {
   public subscribePermissionChanges(
     callback: (state: "granted" | "denied" | "prompt") => void
   ): () => void {
+    this.initPermissionWatcher();
     this.permissionListeners.add(callback);
     return () => {
       this.permissionListeners.delete(callback);

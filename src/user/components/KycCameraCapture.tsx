@@ -70,6 +70,8 @@ export default function KycCameraCapture({
       isMountedRef.current = false;
       unsubscribePerm();
       unregisterConsumer();
+      // Ensure active camera tracks are stopped immediately upon navigating away
+      cameraManager.stopCamera();
       if (capturedPreview && capturedPreview.startsWith("blob:")) {
         URL.revokeObjectURL(capturedPreview);
       }
@@ -140,6 +142,7 @@ export default function KycCameraCapture({
    * User intentionally clicks "Open Camera & Take Photo"
    */
   const handleOpenClick = async () => {
+    if (disabled || isProcessing || status === "REQUESTING" || status === "CAMERA_ACTIVE") return;
     await startCameraStream(facingMode);
   };
 
