@@ -74,7 +74,7 @@ function DocThumb({ docId, label, onZoom }) {
             src={url}
             alt={label}
             onError={(e) => {
-              console.error(`[Admin KYC Image Error] Failed rendering image in DocThumb for docId: ${docId}`, e);
+              console.error(`[Admin KYC Image Error] Failed rendering image in DocThumb for docId: ${docId}`, e?.target?.src || "image_error");
               setErr(true);
             }}
             className="h-full w-full object-cover transition duration-300 group-hover:scale-105"

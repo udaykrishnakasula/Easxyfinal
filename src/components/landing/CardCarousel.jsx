@@ -17,15 +17,19 @@ export default function CardCarousel() {
   // stopOnInteraction:false so we can pause/resume it manually on touch.
   const autoplay = useRef(null);
   if (!autoplay.current) {
-    autoplay.current = Autoplay({
-      delay: 5000,
-      stopOnInteraction: false,
-      stopOnMouseEnter: false,
-    });
+    try {
+      autoplay.current = Autoplay({
+        delay: 5000,
+        stopOnInteraction: false,
+        stopOnMouseEnter: false,
+      });
+    } catch {
+      autoplay.current = null;
+    }
   }
   // Stable plugins array reference so embla does not re-initialize on every
   // re-render (which would keep resetting the autoplay timer).
-  const plugins = useRef([autoplay.current]);
+  const plugins = useRef(autoplay.current ? [autoplay.current] : []);
 
   const [api, setApi] = useState(null);
   const [current, setCurrent] = useState(0);
@@ -35,25 +39,43 @@ export default function CardCarousel() {
     const onSelect = () => {
       try {
         if (typeof api.selectedScrollSnap === "function") {
-          setCurrent(api.selectedScrollSnap());
+          setCurrent(api.selectedScrollSnap() || 0);
         }
       } catch {
         // ignore
       }
     };
-    onSelect();
-    api.on("select", onSelect);
-    return () => api.off("select", onSelect);
+    try {
+      onSelect();
+      api.on("select", onSelect);
+    } catch {
+      // ignore
+    }
+    return () => {
+      try {
+        api?.off("select", onSelect);
+      } catch {
+        // ignore
+      }
+    };
   }, [api]);
 
   // Hold the carousel while a finger/pointer is pressed on a card...
   const holdStart = useCallback(() => {
-    autoplay.current?.stop();
+    try {
+      autoplay.current?.stop();
+    } catch {
+      // ignore
+    }
   }, []);
 
   // ...and let it resume scrolling once the pointer is released.
   const holdEnd = useCallback(() => {
-    autoplay.current?.play();
+    try {
+      autoplay.current?.play();
+    } catch {
+      // ignore
+    }
   }, []);
 
   return (

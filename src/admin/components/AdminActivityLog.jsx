@@ -28,6 +28,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { toast } from "sonner";
+import { safeJsonStringify } from "@/shared/analytics/dataMasker";
 import { useAdminAuditLogs } from "@/admin/adminApi";
 import { EasyXCard, EasyXButton, EasyXLoader, EasyXEmptyState, EasyXModal } from "@/design/EasyX";
 import { money } from "@/user/api";
@@ -562,7 +563,7 @@ export default function AdminActivityLog({
                 <span className="font-mono text-[10px] text-purple-400">JSON Inspector</span>
               </div>
               <pre className="p-3 rounded-xl bg-black/60 border border-white/10 font-mono text-[11px] text-purple-200 overflow-x-auto max-h-60">
-                {JSON.stringify(
+                {safeJsonStringify(
                   {
                     id: selectedAuditLog.id,
                     action: selectedAuditLog.action,
@@ -585,7 +586,6 @@ export default function AdminActivityLog({
                     metadata: selectedAuditLog.meta,
                     created_at: selectedAuditLog.created_at,
                   },
-                  null,
                   2
                 )}
               </pre>

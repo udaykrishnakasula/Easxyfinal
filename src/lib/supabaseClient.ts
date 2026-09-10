@@ -2,7 +2,8 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 // Client-side environment variables
 const env = (import.meta as any).env || {};
-const supabaseUrl = (env.VITE_SUPABASE_URL || "").trim();
+const rawUrl = (env.VITE_SUPABASE_URL || "").trim();
+const supabaseUrl = rawUrl.replace(/\/rest\/v1\/?$/, "").replace(/\/+$/, "");
 const supabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || "").trim();
 
 export const isSupabaseConfigured = (): boolean => {

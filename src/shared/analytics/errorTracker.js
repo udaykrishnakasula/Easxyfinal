@@ -3,7 +3,7 @@
  * Captures UI exceptions, Promise rejections, and failed API requests with context & masking.
  */
 
-import { maskSensitiveData, sanitizeUrl } from "./dataMasker";
+import { maskSensitiveData, sanitizeUrl, safeJsonStringify } from "./dataMasker";
 
 const ERROR_STORAGE_KEY = "easyx_captured_errors_v1";
 const MAX_LOCAL_STORED_ERRORS = 100;
@@ -43,6 +43,24 @@ class ErrorTracker {
         return;
       }
 
+      // Check for DOM element load errors (e.g. <img> or <video> fail to load)
+      if (event.target && typeof Element !== "undefined" && event.target instanceof Element && event.target !== window) {
+        const tag = event.target.tagName ? event.target.tagName.toLowerCase() : "resource";
+        const src = event.target.src || event.target.currentSrc || null;
+        this.captureError({
+          source: "resource.onerror",
+          severity: "warning",
+          errorName: "ResourceLoadError",
+          message: `Failed to load <${tag}> resource: ${src || "unknown source"}`,
+          stack: null,
+          metadata: {
+            tagName: tag,
+            src: src ? String(src).slice(0, 300) : null,
+          },
+        });
+        return;
+      }
+
       this.captureError({
         source: "window.onerror",
         severity: "error",
@@ -71,8 +89,10 @@ class ErrorTracker {
         stack = reason.stack;
       } else if (typeof reason === "string") {
         message = reason;
+      } else if (typeof Element !== "undefined" && reason instanceof Element) {
+        message = `Promise rejected with <${reason.tagName?.toLowerCase() || "element"}> element`;
       } else if (reason && typeof reason === "object") {
-        message = reason.message || reason.detail || JSON.stringify(reason);
+        message = reason.message || reason.detail || safeJsonStringify(reason);
       }
 
       // Ignore benign websocket or abort errors
@@ -182,7 +202,7 @@ class ErrorTracker {
       const stored = this.getStoredErrors();
       stored.unshift(errorItem);
       const trimmed = stored.slice(0, MAX_LOCAL_STORED_ERRORS);
-      localStorage.setItem(ERROR_STORAGE_KEY, JSON.stringify(trimmed));
+      localStorage.setItem(ERROR_STORAGE_KEY, safeJsonStringify(trimmed));
     } catch {
       // Storage full or restricted
     }
@@ -242,7 +262,7 @@ class ErrorTracker {
         fetch("/api/analytics/errors", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ errors: itemsToSend }),
+          body: safeJsonStringify({ errors: itemsToSend }),
         }).catch(() => {
           // ignore network failure
         });

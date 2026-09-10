@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import api, { clearToken, getToken, setToken } from "@/shared/lib/api";
 import { authDiagnostics, AUTH_TRANSITION } from "@/shared/analytics/authDiagnostics";
+import { getSupabaseClient, isSupabaseConfigured, subscribeToUserEvents } from "@/lib/supabaseClient";
 
 const CACHED_USER_KEY = "easyx_user";
 
@@ -125,6 +126,18 @@ export function AuthProvider({ children }) {
     };
   }, [hydrate]);
 
+  // Realtime Supabase updates for user events (wallets, notifications, KYC)
+  useEffect(() => {
+    if (!user?.id || !isSupabaseConfigured()) return;
+    const unsubscribe = subscribeToUserEvents(user.id, () => {
+      // Quietly refresh user state without reloading page
+      hydrate();
+    });
+    return () => {
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
+  }, [user?.id, hydrate]);
+
   const login = useCallback(async (email, password) => {
     try {
       const { data } = await api.post("/auth/login", { email, password });
@@ -174,6 +187,12 @@ export function AuthProvider({ children }) {
   const logout = useCallback(async () => {
     authDiagnostics.logTransition(AUTH_TRANSITION.LOGOUT, { userId: user?.id });
     try {
+      if (isSupabaseConfigured()) {
+        const client = getSupabaseClient();
+        if (client) {
+          client.auth.signOut().catch(() => {});
+        }
+      }
       await api.post("/auth/logout");
     } catch {
       // Ignore network errors on explicit sign out

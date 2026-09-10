@@ -105,8 +105,10 @@ export default function AppLogo({
   const shapeClass = SHAPE_MAP[activeShape] || SHAPE_MAP.rounded;
 
   const presetConfig =
-    ICON_PRESETS.find((p) => p.id === activePresetId) || ICON_PRESETS[0];
-  const PresetIcon = presetConfig.icon;
+    (Array.isArray(ICON_PRESETS) && ICON_PRESETS.find((p) => p?.id === activePresetId)) ||
+    (Array.isArray(ICON_PRESETS) && ICON_PRESETS[0]) ||
+    { id: "default", icon: ShieldCheck, label: "Shield Default", bgGradient: "from-purple-500 to-indigo-600" };
+  const PresetIcon = presetConfig?.icon || ShieldCheck;
 
   const hasValidCustomImage = Boolean(activeIconUrl && !imgError);
 

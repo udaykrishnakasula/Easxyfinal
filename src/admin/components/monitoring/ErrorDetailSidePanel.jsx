@@ -41,6 +41,7 @@ import {
   useAdminErrorLogs,
 } from "@/admin/adminApi";
 import { EasyXButton, EasyXEmptyState, EasyXLoader } from "@/design/EasyX";
+import { safeJsonStringify } from "@/shared/analytics/dataMasker";
 
 dayjs.extend(relativeTime);
 
@@ -192,9 +193,9 @@ export default function ErrorDetailSidePanel({
 
   // Auto-select first error if none selected or selected is filtered out
   useEffect(() => {
-    if (filteredErrors.length > 0) {
-      if (!selectedErrorId || !filteredErrors.some((e) => e.id === selectedErrorId)) {
-        setSelectedErrorId(filteredErrors[0].id);
+    if (Array.isArray(filteredErrors) && filteredErrors.length > 0 && filteredErrors[0]) {
+      if (!selectedErrorId || !filteredErrors.some((e) => e && e.id === selectedErrorId)) {
+        setSelectedErrorId(filteredErrors[0]?.id || null);
       }
     } else {
       setSelectedErrorId(null);
@@ -203,13 +204,13 @@ export default function ErrorDetailSidePanel({
 
   // Currently inspected active error
   const activeError = useMemo(() => {
-    if (!selectedErrorId) return filteredErrors[0] || null;
-    return rawErrors.find((e) => e.id === selectedErrorId) || filteredErrors[0] || null;
+    if (!selectedErrorId) return filteredErrors?.[0] || null;
+    return rawErrors?.find((e) => e && e.id === selectedErrorId) || filteredErrors?.[0] || null;
   }, [rawErrors, filteredErrors, selectedErrorId]);
 
   const handleCopy = (text, key) => {
     if (!text) return;
-    navigator.clipboard.writeText(typeof text === "object" ? JSON.stringify(text, null, 2) : String(text));
+    navigator.clipboard.writeText(typeof text === "object" ? safeJsonStringify(text, 2) : String(text));
     setCopiedKey(key);
     toast.success("Copied to clipboard!");
     setTimeout(() => setCopiedKey(null), 2000);
@@ -876,7 +877,7 @@ export default function ErrorDetailSidePanel({
                               </button>
                             </div>
                             <div className="p-3 rounded-xl bg-black/60 border border-white/10 font-mono text-[11px] text-purple-200 overflow-x-auto whitespace-pre">
-                              {JSON.stringify(activeError.metadata, null, 2)}
+                              {safeJsonStringify(activeError.metadata, 2)}
                             </div>
                           </div>
                         )}

@@ -343,6 +343,65 @@ class EmailService {
   }
 
   /**
+   * Template: Withdrawal Security Verification OTP
+   */
+  public async sendWithdrawalOtpEmail(params: {
+    to: string;
+    name?: string;
+    code: string;
+    amount: number | string;
+    network: string;
+    toAddress: string;
+    expiresInMinutes?: number;
+  }): Promise<EmailSendResult> {
+    const expiresMin = params.expiresInMinutes || 5;
+    const cleanTo = params.to.trim().toLowerCase();
+    const maskedAddr = params.toAddress.length > 12
+      ? `${params.toAddress.slice(0, 6)}...${params.toAddress.slice(-4)}`
+      : params.toAddress;
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>EasyX Withdrawal Authorization Code</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #0c0d14; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f3f4f6;">
+  <div style="max-width: 560px; margin: 40px auto; background: #141622; border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 32px;">
+    <div style="text-align: center; margin-bottom: 24px;">
+      <h2 style="color: #9333ea; margin: 0 0 8px 0; font-size: 22px;">EasyX Security Verification</h2>
+      <p style="color: #9ca3af; margin: 0; font-size: 14px;">Authorize USDT Withdrawal Request</p>
+    </div>
+
+    <p style="color: #d1d5db; font-size: 14px; line-height: 22px;">
+      Hello ${params.name || "Investor"},<br>
+      A withdrawal of <strong>${Number(params.amount).toFixed(2)} USDT</strong> (${params.network}) to destination address <strong>${maskedAddr}</strong> was requested from your EasyX account.
+    </p>
+
+    <div style="background: rgba(147, 51, 234, 0.08); border: 1px dashed rgba(147, 51, 234, 0.4); border-radius: 12px; padding: 24px; text-align: center; margin: 28px 0;">
+      <div style="font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #c084fc; margin-bottom: 8px;">One-Time Security Code</div>
+      <div style="font-family: monospace; font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #ffffff;">${params.code}</div>
+      <div style="font-size: 12px; color: #9ca3af; margin-top: 8px;">Valid for ${expiresMin} minutes. Never share this code with anyone.</div>
+    </div>
+
+    <p style="color: #f87171; font-size: 13px; line-height: 20px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.2); padding: 12px; border-radius: 8px;">
+      <strong>Security Notice:</strong> EasyX staff will NEVER ask for this code. If you did not initiate this withdrawal request, please log into your account and change your password immediately.
+    </p>
+  </div>
+</body>
+</html>
+    `;
+
+    return this.sendMail({
+      to: cleanTo,
+      subject: `[EasyX] Security Code: ${params.code} for USDT Withdrawal`,
+      html,
+      category: "security_alert",
+    });
+  }
+
+  /**
    * Template: Password Change Confirmation Alert
    */
   public async sendPasswordChangedAlert(params: { to: string; name?: string; ip?: string }): Promise<EmailSendResult> {

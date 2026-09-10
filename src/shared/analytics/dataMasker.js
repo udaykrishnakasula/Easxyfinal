@@ -86,9 +86,40 @@ export function maskSensitiveData(data, depth = 0, seen = new WeakSet()) {
   if (typeof data === "number" || typeof data === "boolean") {
     return data;
   }
+  if (typeof data === "function") {
+    return `[Function: ${data.name || "anonymous"}]`;
+  }
 
-  // Handle circular references
+  // Handle DOM elements and Nodes safely (e.g. HTMLImageElement, HTMLDivElement, etc.)
+  if (typeof Element !== "undefined" && data instanceof Element) {
+    const tag = data.tagName ? data.tagName.toLowerCase() : "element";
+    const id = data.id ? `#${data.id}` : "";
+    const className = typeof data.className === "string" && data.className.trim() ? `.${data.className.trim().split(/\s+/)?.[0] || ""}` : "";
+    return `[DOM_ELEMENT: <${tag}${id}${className}>]`;
+  }
+  if (typeof Node !== "undefined" && data instanceof Node) {
+    return "[DOM_NODE]";
+  }
+  if (typeof Window !== "undefined" && (data === window || data instanceof Window)) {
+    return "[WINDOW]";
+  }
+  if (typeof Document !== "undefined" && (data === document || data instanceof Document)) {
+    return "[DOCUMENT]";
+  }
+  if (typeof Event !== "undefined" && data instanceof Event) {
+    return {
+      type: data.type,
+      target: data.target && data.target.tagName ? `<${data.target.tagName.toLowerCase()}>` : "[EventTarget]",
+    };
+  }
+
+  // Handle React Fiber nodes
   if (typeof data === "object") {
+    if (data.stateNode !== undefined && data.memoizedState !== undefined) {
+      return "[REACT_FIBER_NODE]";
+    }
+
+    // Handle circular references
     if (seen.has(data)) return "[CIRCULAR_REFERENCE]";
     seen.add(data);
 
@@ -106,6 +137,10 @@ export function maskSensitiveData(data, depth = 0, seen = new WeakSet()) {
 
     const sanitizedObj = {};
     for (const [key, value] of Object.entries(data)) {
+      // Skip React internals
+      if (typeof key === "string" && (key.startsWith("__react") || key.startsWith("$$typeof") || key.startsWith("_owner"))) {
+        continue;
+      }
       if (isSensitiveKey(key)) {
         sanitizedObj[key] = "[REDACTED_SENSITIVE_FIELD]";
       } else {
@@ -116,6 +151,57 @@ export function maskSensitiveData(data, depth = 0, seen = new WeakSet()) {
   }
 
   return "[UNSUPPORTED_DATA_TYPE]";
+}
+
+/**
+ * Ultra-safe JSON serializer that never throws on circular structures, DOM elements, or React fibers
+ */
+export function safeJsonStringify(value, space = null) {
+  const seen = new WeakSet();
+  try {
+    return JSON.stringify(
+      value,
+      (key, val) => {
+        // Skip React internal properties
+        if (typeof key === "string" && (key.startsWith("__react") || key.startsWith("$$typeof") || key.startsWith("_owner"))) {
+          return undefined;
+        }
+        // Handle DOM elements
+        if (typeof Element !== "undefined" && val instanceof Element) {
+          const tag = val.tagName ? val.tagName.toLowerCase() : "element";
+          const id = val.id ? `#${val.id}` : "";
+          return `[DOM_ELEMENT: <${tag}${id}>]`;
+        }
+        if (typeof Node !== "undefined" && val instanceof Node) {
+          return "[DOM_NODE]";
+        }
+        if (typeof Event !== "undefined" && val instanceof Event) {
+          return `[EVENT: ${val.type}]`;
+        }
+        if (typeof Window !== "undefined" && (val === window || val instanceof Window)) {
+          return "[WINDOW]";
+        }
+        if (typeof Document !== "undefined" && (val === document || val instanceof Document)) {
+          return "[DOCUMENT]";
+        }
+        // Circular reference detection
+        if (typeof val === "object" && val !== null) {
+          if (seen.has(val)) {
+            return "[CIRCULAR]";
+          }
+          seen.add(val);
+        }
+        return val;
+      },
+      space
+    );
+  } catch {
+    try {
+      return String(value);
+    } catch {
+      return "[UNSERIALIZABLE]";
+    }
+  }
 }
 
 /**

@@ -89,7 +89,7 @@ function DepositProofThumb({ img, idx, title, onOpen, className = "h-14 w-20" })
       `[Admin Deposit Proof Error] Failed to load deposit proof image #${idx + 1}. Source: ${
         typeof img === "string" ? img.substring(0, 100) : typeof img
       }`,
-      e
+      e?.target?.src || "image_load_failed"
     );
     setHasError(true);
   };

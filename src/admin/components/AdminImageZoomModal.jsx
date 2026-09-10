@@ -278,7 +278,7 @@ export function AdminImageZoomModal({
                 onError={(e) => {
                   console.error(
                     `[AdminImageZoomModal] Failed to render image for: ${title}`,
-                    e
+                    e?.target?.src || "image_error"
                   );
                   setLoadError(true);
                 }}

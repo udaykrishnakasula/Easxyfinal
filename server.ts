@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express, { type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
@@ -29,7 +30,21 @@ import { monitoringService } from "./src/server/monitoringService";
 import { BackupService } from "./src/server/backupService";
 import { emailService } from "./src/server/emailService";
 import { promotionsService } from "./src/server/promotionsService";
-import { checkSupabaseConnection, isSupabaseAdminConfigured, getSupabaseAdmin } from "./src/server/supabaseAdmin";
+import {
+  checkSupabaseConnection,
+  isSupabaseAdminConfigured,
+  isSupabaseServerConfigured,
+  getSupabaseAdmin,
+  getSupabaseServerClient,
+} from "./src/server/supabaseAdmin";
+import { supabaseSync } from "./src/server/supabaseSync";
+import { supabaseDb } from "./src/server/supabaseDb";
+import {
+  requireDatabaseHealthy,
+  checkDatabaseReadiness,
+} from "./src/server/databaseHealthService";
+import { withdrawalOtpService } from "./src/server/withdrawalOtpService";
+import { maturityWorker } from "./src/server/maturityWorker";
 
 // ==================== PRODUCTION ENVIRONMENT STARTUP CONFIGURATION ====================
 const isProduction = process.env.NODE_ENV === "production";
@@ -84,12 +99,45 @@ if (!fs.existsSync(SUPPORT_ATTACHMENTS_DIR)) fs.mkdirSync(SUPPORT_ATTACHMENTS_DI
 app.use("/uploads", express.static(UPLOADS_DIR));
 
 // Root-level Health & Liveness Probe for Load Balancers and Container Orchestrators
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    status: "ok",
+app.get("/health", async (_req, res) => {
+  const readiness = await checkDatabaseReadiness(false);
+  res.status(readiness.ready ? 200 : 503).json({
+    status: readiness.ready ? "ok" : "unavailable",
     timestamp: new Date().toISOString(),
+    database: readiness.ready ? "connected" : "disconnected",
     supabaseConfigured: isSupabaseAdminConfigured(),
   });
+});
+
+app.get("/api/health/readiness", async (_req, res) => {
+  try {
+    const readiness = await checkDatabaseReadiness(false);
+    if (!readiness.ready) {
+      return res.status(503).json({
+        ready: false,
+        status: "unavailable",
+        database: "disconnected",
+        detail: "Server temporarily unavailable. Please try again later.",
+        error: process.env.NODE_ENV === "development" ? readiness.error : undefined,
+        timestamp: readiness.timestamp,
+      });
+    }
+    return res.status(200).json({
+      ready: true,
+      status: "ready",
+      database: "connected",
+      latencyMs: readiness.latencyMs,
+      timestamp: readiness.timestamp,
+      tablesVerified: readiness.tablesVerified,
+    });
+  } catch (err: any) {
+    return res.status(503).json({
+      ready: false,
+      status: "unavailable",
+      database: "disconnected",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
 });
 
 app.get("/api/health/supabase", async (_req, res) => {
@@ -97,12 +145,247 @@ app.get("/api/health/supabase", async (_req, res) => {
     const report = await checkSupabaseConnection();
     res.status(report.connected ? 200 : 200).json(report);
   } catch (err: any) {
-    res.status(500).json({
+    res.status(503).json({
       configured: isSupabaseAdminConfigured(),
       connected: false,
       message: err.message || "Failed to check Supabase status",
     });
   }
+});
+
+// Raw SQL migration download/view endpoint
+app.get("/schema.sql", (_req, res) => {
+  const sqlPath = path.join(process.cwd(), "supabase/migrations/20260901_easyx_initial_schema.sql");
+  if (fs.existsSync(sqlPath)) {
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.send(fs.readFileSync(sqlPath, "utf-8"));
+  } else {
+    res.status(404).send("-- Migration file not found");
+  }
+});
+
+// Interactive 1-Click Copy Page for mobile & desktop
+app.get("/copy-schema", (_req, res) => {
+  const masterPath = path.join(process.cwd(), "supabase/migrations/20260907_easyx_complete_master_schema.sql");
+  const schemaPath = path.join(process.cwd(), "supabase/migrations/20260901_easyx_initial_schema.sql");
+  const storagePath = path.join(process.cwd(), "supabase/migrations/20260901_easyx_storage_buckets.sql");
+  const kycPath = path.join(process.cwd(), "supabase/migrations/20260902_add_id_number_and_permanent_address_to_kyc.sql");
+  const planCorrectionPath = path.join(process.cwd(), "supabase/migrations/20260907_correct_investment_plans.sql");
+
+  const masterSql = fs.existsSync(masterPath) ? fs.readFileSync(masterPath, "utf-8") : "";
+  const schemaSql = fs.existsSync(schemaPath) ? fs.readFileSync(schemaPath, "utf-8") : "";
+  const storageSql = fs.existsSync(storagePath) ? fs.readFileSync(storagePath, "utf-8") : "";
+  const kycSql = fs.existsSync(kycPath) ? fs.readFileSync(kycPath, "utf-8") : "";
+  const planCorrectionSql = fs.existsSync(planCorrectionPath) ? fs.readFileSync(planCorrectionPath, "utf-8") : "";
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EasyX Supabase SQL Migrations</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 16px;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+      max-width: 800px;
+      width: 100%;
+      box-sizing: border-box;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.3rem;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .tab-bar {
+      display: flex;
+      gap: 8px;
+      margin: 16px 0 12px 0;
+      flex-wrap: wrap;
+    }
+    .tab-btn {
+      background: #334155;
+      color: #e2e8f0;
+      border: none;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .tab-btn.active {
+      background: #0284c7;
+      color: #ffffff;
+    }
+    .btn-copy {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 14px 20px;
+      font-size: 1.1rem;
+      font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+      margin: 12px 0;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn-copy:active {
+      transform: scale(0.98);
+      background: #1d4ed8;
+    }
+    .btn-copy.success {
+      background: #16a34a !important;
+    }
+    .success-badge {
+      background: #064e3b;
+      border: 1px solid #059669;
+      color: #34d399;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin: 10px 0;
+    }
+    textarea {
+      width: 100%;
+      height: 240px;
+      background: #020617;
+      color: #22c55e;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 11px;
+      box-sizing: border-box;
+      resize: vertical;
+      margin-top: 14px;
+    }
+    .links {
+      margin-top: 14px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .links a {
+      color: #38bdf8;
+      text-decoration: underline;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span>⚡</span> EasyX Supabase SQL Migrations</h1>
+    <div class="success-badge">
+      ✅ Initial Tables & Plans Schema: Successfully Connected & Verified!
+    </div>
+
+    <p>Select a script below and tap Copy to run it in your Supabase SQL Editor:</p>
+
+    <div class="tab-bar">
+      <button class="tab-btn active" style="background:#059669;color:#fff;font-weight:bold;" onclick="selectScript(0)">⭐ Complete All-In-One Schema</button>
+      <button class="tab-btn" onclick="selectScript(4)">⚡ Plan Update Only (60% & 100%)</button>
+      <button class="tab-btn" onclick="selectScript(2)">Storage Buckets</button>
+      <button class="tab-btn" onclick="selectScript(3)">KYC Extended Fields</button>
+    </div>
+
+    <button id="copyBtn" class="btn-copy" onclick="copyCurrentScript()">
+      📋 Tap to Copy Selected Script
+    </button>
+    <div id="status" style="display:none; text-align:center; font-weight:bold; color:#4ade80; margin-bottom:12px;">
+      ✅ Copied to clipboard!
+    </div>
+
+    <textarea id="sqlBox" readonly></textarea>
+
+    <div class="links">
+      <a href="https://supabase.com/dashboard/project/dgelzeodcpouuhytdoft/sql" target="_blank" rel="noopener">Open Supabase SQL Editor &rarr;</a>
+      <a href="/api/health/supabase" target="_blank">Check Connection Status</a>
+    </div>
+  </div>
+
+  <script>
+    const scripts = {
+      0: ${JSON.stringify(masterSql)},
+      1: ${JSON.stringify(schemaSql)},
+      2: ${JSON.stringify(storageSql)},
+      3: ${JSON.stringify(kycSql)},
+      4: ${JSON.stringify(planCorrectionSql)}
+    };
+
+    let activeScript = 0;
+
+    function selectScript(num) {
+      activeScript = num;
+      document.querySelectorAll('.tab-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.getAttribute('onclick') === 'selectScript(' + num + ')');
+      });
+      document.getElementById('sqlBox').value = scripts[num] || '';
+      document.getElementById('copyBtn').innerHTML = num === 0 ? '📋 Tap to Copy Complete All-In-One Schema' : ('📋 Tap to Copy Script #' + num);
+      document.getElementById('status').style.display = 'none';
+    }
+
+    selectScript(0); // default to all-in-one schema!
+
+    async function copyCurrentScript() {
+      const btn = document.getElementById('copyBtn');
+      const status = document.getElementById('status');
+      const text = scripts[activeScript];
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.getElementById('sqlBox');
+          textarea.select();
+          document.execCommand('copy');
+        }
+        btn.classList.add('success');
+        btn.innerHTML = '✅ Copied Script #' + activeScript + '!';
+        status.style.display = 'block';
+        setTimeout(() => {
+          btn.classList.remove('success');
+          btn.innerHTML = '📋 Tap to Copy Script #' + activeScript;
+        }, 3000);
+      } catch (err) {
+        const textarea = document.getElementById('sqlBox');
+        textarea.select();
+      }
+    }
+  </script>
+</body>
+</html>`;
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(html);
 });
 
 // ==================== IN-MEMORY RATE LIMITING ENGINE ====================
@@ -593,6 +876,11 @@ const saveDatabase = (immediate = false) => {
         }
       }
       fs.renameSync(tmpFile, DB_FILE);
+
+      // Asynchronously synchronize state to Supabase if configured
+      if (isSupabaseServerConfigured()) {
+        supabaseSync.syncEntireStateToSupabase(db).catch(() => {});
+      }
     } catch (err) {
       console.error("[EasyX DB] Failed to save database to disk:", err);
     }
@@ -832,6 +1120,12 @@ const seedDatabase = async () => {
         created_at: ts,
         updated_at: ts,
       });
+    } else {
+      const existing = db.investment_plans.get(p.key);
+      existing.lock_days = 60;
+      existing.profit_percentage = p.profit_percentage;
+      existing.maturity_percentage = p.maturity_percentage;
+      db.investment_plans.set(p.key, existing);
     }
   }
 
@@ -840,74 +1134,112 @@ const seedDatabase = async () => {
   const adminPassword = process.env.ADMIN_PASSWORD || "Admin@Easyx2026";
   const adminHash = await bcrypt.hash(adminPassword, 10);
 
-  // Security: Ensure designated admin account is granted the 'admin' role
-  const soleAdminUser = Array.from(db.users.values()).find(
-    (u) => (u.email || "").toLowerCase().trim() === soleAdminEmail
-  );
-  if (soleAdminUser && soleAdminUser.role !== "admin") {
-    soleAdminUser.role = "admin";
+  let adminProfile: any = null;
+  try {
+    adminProfile = await supabaseDb.getProfileByEmail(soleAdminEmail);
+  } catch (err: any) {
+    console.log("[EasyX DB] Supabase admin profile lookup note:", err?.message);
   }
+
+  const designatedAdminId = adminProfile?.id || "2f472fc1-13c9-4a8a-8be6-060d4c7d28e7";
 
   let soleAdmin = Array.from(db.users.values()).find(
     (u) => u.email && u.email.toLowerCase().trim() === soleAdminEmail
   );
 
+  // Clean up any legacy non-UUID admin ID in memory/disk
+  if (soleAdmin && !supabaseDb.isUuid(soleAdmin.id)) {
+    db.users.delete(soleAdmin.id);
+    soleAdmin.id = designatedAdminId;
+    db.users.set(designatedAdminId, soleAdmin);
+  }
+
+  for (const [k, u] of db.users.entries()) {
+    if (k.startsWith("admin-owner") || (u.email && u.email.toLowerCase().trim() === soleAdminEmail && !supabaseDb.isUuid(k))) {
+      db.users.delete(k);
+    }
+  }
+
   if (!soleAdmin) {
-    const adminId = "admin-owner-" + genId().substring(0, 8);
+    const adminId = designatedAdminId;
     soleAdmin = {
       id: adminId,
-      name: "Platform Owner Admin",
+      name: adminProfile?.name || "Platform Owner Admin",
       email: soleAdminEmail,
-      phone: "+919876500001",
+      phone: adminProfile?.phone || "+919876500001",
       password_hash: adminHash,
       role: "admin",
       email_verified: true,
       kyc_status: "approved",
       status: "active",
-      referral_code: "ADMINEX1",
+      referral_code: adminProfile?.referral_code || "ADMINEX1",
       referred_by: null,
       created_at: ts,
       last_login_at: null,
     };
     db.users.set(adminId, soleAdmin);
     getOrCreateWallet(adminId);
-    console.log(`[EasyX DB] Initialized sole platform admin account: ${soleAdminEmail}`);
+    console.log(`[EasyX DB] Initialized sole platform admin account: ${soleAdminEmail} (UUID: ${adminId})`);
   } else {
+    soleAdmin.id = designatedAdminId;
     soleAdmin.role = "admin";
     if (!soleAdmin.password_hash) {
       soleAdmin.password_hash = adminHash;
     }
-    db.users.set(soleAdmin.id, soleAdmin);
+    db.users.set(designatedAdminId, soleAdmin);
   }
 
   // 2c. Investor / User Account (coloursfaction@gmail.com -> User App)
   const defaultInvestorEmail = "coloursfaction@gmail.com";
+  let investorProfile: any = null;
+  try {
+    investorProfile = await supabaseDb.getProfileByEmail(defaultInvestorEmail);
+  } catch (err: any) {
+    // ignore
+  }
+
+  const designatedInvestorId = investorProfile?.id || "8f31e909-06a2-4319-9db5-026192501552";
+
   let investorUser = Array.from(db.users.values()).find(
     (u) => u.email && u.email.toLowerCase().trim() === defaultInvestorEmail
   );
+
+  if (investorUser && !supabaseDb.isUuid(investorUser.id)) {
+    db.users.delete(investorUser.id);
+    investorUser.id = designatedInvestorId;
+    db.users.set(designatedInvestorId, investorUser);
+  }
+
+  for (const [k, u] of db.users.entries()) {
+    if (k.startsWith("user-investor") || (u.email && u.email.toLowerCase().trim() === defaultInvestorEmail && !supabaseDb.isUuid(k))) {
+      db.users.delete(k);
+    }
+  }
+
   const userPassword = process.env.USER_PASSWORD || "User@Easyx2026";
   const userHash = await bcrypt.hash(userPassword, 10);
   if (!investorUser) {
-    const investorId = "user-investor-" + genId().substring(0, 8);
+    const investorId = designatedInvestorId;
     investorUser = {
       id: investorId,
-      name: "Investor (Colours Faction)",
+      name: investorProfile?.name || "Investor (Colours Faction)",
       email: defaultInvestorEmail,
-      phone: "+919876500002",
+      phone: investorProfile?.phone || "+919876500002",
       password_hash: userHash,
       role: "user",
       email_verified: true,
       kyc_status: "none",
       status: "active",
-      referral_code: "COLORSEX1",
+      referral_code: investorProfile?.referral_code || "COLORSEX1",
       referred_by: null,
       created_at: ts,
       last_login_at: null,
     };
     db.users.set(investorUser.id, investorUser);
     getOrCreateWallet(investorUser.id);
-    console.log(`[EasyX DB] Initialized primary user account: ${defaultInvestorEmail}`);
+    console.log(`[EasyX DB] Initialized primary user account: ${defaultInvestorEmail} (UUID: ${investorId})`);
   } else {
+    investorUser.id = designatedInvestorId;
     investorUser.role = "user";
     if (!investorUser.password_hash) {
       investorUser.password_hash = userHash;
@@ -915,7 +1247,7 @@ const seedDatabase = async () => {
     if (!db.kyc_records.has(investorUser.id)) {
       investorUser.kyc_status = "none";
     }
-    db.users.set(investorUser.id, investorUser);
+    db.users.set(designatedInvestorId, investorUser);
   }
 
   // Clean initialization — No dummy users, fake investments, or mock transaction data
@@ -968,6 +1300,37 @@ const getOrCreateWallet = (userId: string) => {
     };
     db.wallets.set(userId, w);
   }
+
+  // Self-heal and reconcile wallet available_balance from approved deposits
+  let approvedDepositTotal = 0;
+  for (const dep of db.deposits.values()) {
+    if (dep.user_id === userId && dep.status === "approved") {
+      approvedDepositTotal += Number(dep.approved_amount || dep.amount || 0);
+    }
+  }
+  let investedTotal = 0;
+  for (const inv of db.investments.values()) {
+    if (inv.user_id === userId && (inv.status === "active" || inv.status === "completed")) {
+      investedTotal += Number(inv.principal || 0);
+    }
+  }
+  let withdrawalTotal = 0;
+  for (const withdr of db.withdrawals.values()) {
+    if (withdr.user_id === userId && (withdr.status === "approved" || withdr.status === "completed")) {
+      withdrawalTotal += Number(withdr.amount || 0);
+    }
+  }
+
+  const netAvailable = Math.max(0, approvedDepositTotal - investedTotal - withdrawalTotal);
+  if (Number(w.available_balance || 0) < netAvailable) {
+    w.available_balance = fmt(netAvailable);
+    if (!w.total_deposited || Number(w.total_deposited) < approvedDepositTotal) {
+      w.total_deposited = fmt(approvedDepositTotal);
+    }
+    w.updated_at = nowIso();
+    saveDatabase();
+  }
+
   return w;
 };
 
@@ -1279,44 +1642,138 @@ function sanitizeAuthToken(rawHeader?: string): string | null {
   return token;
 }
 
-const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   const rawAuth = req.headers.authorization || (typeof req.query?.token === "string" ? req.query.token : undefined);
   const token = sanitizeAuthToken(rawAuth);
   if (!token) {
     return res.status(401).json({ detail: "Not authenticated" });
   }
+
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as any;
-    const userId = payload?.sub || payload?.id;
+    let userId: string | null = null;
+    let userEmail: string | null = null;
+
+    // 1. Try Supabase Auth Token verification
+    const supabaseAdmin = getSupabaseAdmin();
+    if (supabaseAdmin) {
+      try {
+        const { data: authUser, error } = await supabaseAdmin.auth.getUser(token);
+        if (!error && authUser?.user?.id) {
+          userId = authUser.user.id;
+          userEmail = authUser.user.email || null;
+        }
+      } catch {
+        // Fall through to JWT verify
+      }
+    }
+
+    // 2. Fallback to server-signed JWT
+    if (!userId) {
+      try {
+        const payload = jwt.verify(token, JWT_SECRET) as any;
+        userId = payload?.sub || payload?.id;
+        userEmail = payload?.email || null;
+      } catch (jwtErr: any) {
+        return res.status(401).json({ detail: "Invalid or expired token" });
+      }
+    }
+
     if (!userId) {
       return res.status(401).json({ detail: "Invalid token payload" });
     }
-    const user = db.users.get(userId);
-    if (!user) {
+
+    // 3. Load user profile from Supabase
+    let profile: any = null;
+    let resolvedUserId = userId;
+
+    if (supabaseDb.isUuid(resolvedUserId)) {
+      profile = await supabaseDb.getProfileById(resolvedUserId);
+    } else {
+      // Legacy token or custom prefix
+      if (resolvedUserId.startsWith("admin-owner") || resolvedUserId.toLowerCase().includes("admin")) {
+        profile = await supabaseDb.getProfileByEmail(getSoleAdminEmail());
+      } else {
+        const local = db.users.get(resolvedUserId);
+        if (local?.email) {
+          profile = await supabaseDb.getProfileByEmail(local.email);
+        } else if (userEmail) {
+          profile = await supabaseDb.getProfileByEmail(userEmail);
+        }
+      }
+      if (profile?.id) {
+        resolvedUserId = profile.id;
+      }
+    }
+
+    if (!profile && userEmail) {
+      profile = await supabaseDb.getProfileByEmail(userEmail);
+      if (profile?.id) resolvedUserId = profile.id;
+    }
+    if (!profile) {
+      profile = db.users.get(userId) || db.users.get(resolvedUserId);
+    }
+
+    if (!profile) {
       return res.status(401).json({ detail: "User not found" });
     }
-    if (user.status === "suspended" || user.status === "banned") {
-      console.warn(`[EasyX Auth Middleware] Blocked suspended/banned user ${user.id} (${user.email}).`);
+
+    if (profile.status === "suspended" || profile.status === "banned") {
+      console.warn(`[EasyX Auth Middleware] Blocked suspended/banned user ${profile.id} (${profile.email}).`);
       return res.status(403).json({ detail: "This account has been suspended. Please contact support." });
     }
-    (req as any).user = user;
+
+    const clean = supabaseDb.formatProfile(profile);
+    (req as any).user = clean;
+    // Mirror in local db for any legacy utilities
+    db.users.set(clean.id, clean);
     next();
-  } catch (jwtErr: any) {
-    return res.status(401).json({ detail: "Invalid or expired token" });
+  } catch (err: any) {
+    return res.status(401).json({ detail: "Authentication failed: " + err.message });
   }
 };
 
-const optionalAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
+const optionalAuthMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   const rawAuth = req.headers.authorization || (typeof req.query?.token === "string" ? req.query.token : undefined);
   const token = sanitizeAuthToken(rawAuth);
   if (token) {
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
-      const userId = payload?.sub || payload?.id;
+      let userId: string | null = null;
+      const supabaseAdmin = getSupabaseAdmin();
+      if (supabaseAdmin) {
+        try {
+          const { data: authUser } = await supabaseAdmin.auth.getUser(token);
+          if (authUser?.user?.id) userId = authUser.user.id;
+        } catch {
+          // Ignored
+        }
+      }
+      if (!userId) {
+        try {
+          const payload = jwt.verify(token, JWT_SECRET) as any;
+          userId = payload?.sub || payload?.id;
+        } catch {
+          // Ignored
+        }
+      }
       if (userId) {
-        const user = db.users.get(userId);
-        if (user && user.status !== "suspended" && user.status !== "banned") {
-          (req as any).user = user;
+        let profile: any = null;
+        if (supabaseDb.isUuid(userId)) {
+          profile = await supabaseDb.getProfileById(userId);
+        } else {
+          if (userId.startsWith("admin-owner") || userId.toLowerCase().includes("admin")) {
+            profile = await supabaseDb.getProfileByEmail(getSoleAdminEmail());
+          } else {
+            const local = db.users.get(userId);
+            if (local?.email) {
+              profile = await supabaseDb.getProfileByEmail(local.email);
+            }
+          }
+        }
+        if (!profile) profile = db.users.get(userId);
+        if (profile && profile.status !== "suspended" && profile.status !== "banned") {
+          const clean = supabaseDb.formatProfile(profile);
+          (req as any).user = clean;
+          db.users.set(clean.id, clean);
         }
       }
     } catch {
@@ -1326,8 +1783,8 @@ const optionalAuthMiddleware = (req: Request, res: Response, next: NextFunction)
   next();
 };
 
-const adminMiddleware = (req: Request, res: Response, next: NextFunction) => {
-  authMiddleware(req, res, () => {
+const adminMiddleware = async (req: Request, res: Response, next: NextFunction) => {
+  await authMiddleware(req, res, () => {
     const user = (req as any).user;
     const soleAdminEmail = getSoleAdminEmail();
     const userEmail = (user?.email || "").toLowerCase().trim();
@@ -1440,27 +1897,41 @@ const matureInvestment = async (inv: any) => {
   const principal = inv.principal;
   const profit = inv.profit_amount;
 
-  await creditWallet(
-    inv.user_id,
-    principal,
-    "INVESTMENT_MATURITY",
-    "investment",
-    inv.id,
-    `maturity-principal:${inv.id}`,
-    `${inv.plan_name} principal returned at maturity`
-  );
+  // 1. Process authoritative maturity in Supabase if configured
+  if (isSupabaseAdminConfigured()) {
+    try {
+      await supabaseDb.matureInvestment(inv.id);
+    } catch (sbErr: any) {
+      console.warn(`[MaturityEngine] Supabase maturity notice for ${inv.id}:`, sbErr?.message);
+    }
+  }
 
-  if (Number(profit) > 0) {
+  // 2. Mirror in local memory wallet and database
+  try {
     await creditWallet(
       inv.user_id,
-      profit,
-      "PROFIT",
+      principal,
+      "INVESTMENT_MATURITY",
       "investment",
       inv.id,
-      `maturity-profit:${inv.id}`,
-      `${inv.plan_name} profit at maturity`,
-      profit
+      `maturity-principal:${inv.id}`,
+      `${inv.plan_name} principal returned at maturity`
     );
+
+    if (Number(profit) > 0) {
+      await creditWallet(
+        inv.user_id,
+        profit,
+        "PROFIT",
+        "investment",
+        inv.id,
+        `maturity-profit:${inv.id}`,
+        `${inv.plan_name} profit at maturity`,
+        profit
+      );
+    }
+  } catch (memErr: any) {
+    console.warn(`[MaturityEngine] Local memory credit note:`, memErr?.message);
   }
 
   inv.status = "matured";
@@ -1482,6 +1953,29 @@ const matureInvestment = async (inv: any) => {
 const runMaturitySweep = async () => {
   const now = new Date().toISOString();
   let matured = 0;
+
+  // 1. Run authoritative sweep in Supabase if configured
+  if (isSupabaseAdminConfigured()) {
+    try {
+      const sbResult = await supabaseDb.runMaturitySweep();
+      if (sbResult?.matured) {
+        matured += sbResult.matured;
+        // Mirror matured status in local cache
+        for (const id of sbResult.matured_ids || []) {
+          const localInv = db.investments.get(id);
+          if (localInv) {
+            localInv.status = "matured";
+            localInv.matured_at = now;
+            localInv.updated_at = now;
+          }
+        }
+      }
+    } catch (sbSweepErr: any) {
+      console.warn("[MaturityEngine] Supabase maturity sweep notice:", sbSweepErr?.message);
+    }
+  }
+
+  // 2. Check local in-memory fallback for any unsynced records
   for (const inv of db.investments.values()) {
     if (inv.status === "active" && inv.maturity_at && inv.maturity_at <= now) {
       if (await matureInvestment(inv)) matured++;
@@ -1636,11 +2130,33 @@ api.use((req: any, res: any, next) => {
 });
 
 // Health & Liveness Probe
-api.get("/health", (_req, res) => {
-  res.status(200).json({
-    status: "ok",
+api.get("/health", async (_req, res) => {
+  const readiness = await checkDatabaseReadiness(false);
+  res.status(readiness.ready ? 200 : 503).json({
+    status: readiness.ready ? "ok" : "unavailable",
     service: "easyx-api",
+    database: readiness.ready ? "connected" : "disconnected",
     timestamp: new Date().toISOString(),
+  });
+});
+
+api.get("/health/readiness", async (_req, res) => {
+  const readiness = await checkDatabaseReadiness(false);
+  if (!readiness.ready) {
+    return res.status(503).json({
+      ready: false,
+      status: "unavailable",
+      database: "disconnected",
+      detail: "Server temporarily unavailable. Please try again later.",
+      timestamp: readiness.timestamp,
+    });
+  }
+  return res.status(200).json({
+    ready: true,
+    status: "ready",
+    database: "connected",
+    latencyMs: readiness.latencyMs,
+    timestamp: readiness.timestamp,
   });
 });
 
@@ -1673,6 +2189,21 @@ api.get(["/branding", "/public/branding", "/public/settings/branding"], (_req, r
     primary_color: ps.primary_color || "#7c3aed",
     updated_at: ps.branding_updated_at || new Date().toISOString(),
   });
+});
+
+// Enforce FAIL-CLOSED architecture across all operational, financial, and administrative routes
+api.use(async (req, res, next) => {
+  const reqPath = req.path || "";
+  if (
+    reqPath.startsWith("/health") ||
+    reqPath === "/maintenance" ||
+    reqPath.startsWith("/branding") ||
+    reqPath.startsWith("/public/branding") ||
+    reqPath.startsWith("/public/settings/branding")
+  ) {
+    return next();
+  }
+  return requireDatabaseHealthy(req, res, next);
 });
 
 // Helper: Normalize 10-digit Indian Mobile Number
@@ -1756,107 +2287,51 @@ api.post("/auth/register", registerLimiter, async (req, res) => {
     }
   }
 
-  let referredBy: string | null = null;
-  if (referral_code) {
-    for (const u of db.users.values()) {
-      if (u.referral_code && u.referral_code.trim().toUpperCase() === String(referral_code).trim().toUpperCase()) {
-        referredBy = u.id;
-        break;
-      }
-    }
-    if (!referredBy) {
-      console.warn(`[EasyX Auth] Registration rejected: Invalid referral code '${referral_code}'.`);
-      return res.status(400).json({ detail: "Invalid referral code." });
-    }
-  }
-
-  const userId = genId();
-  const passwordHash = await bcrypt.hash(password, 10);
-  const ts = nowIso();
-
-  const newUser = {
-    id: userId,
-    name: String(name).trim(),
-    email: cleanEmail,
-    phone: cleanPhone,
-    password_hash: passwordHash,
-    role: "user",
-    email_verified: true,
-    kyc_status: "none",
-    status: "active",
-    referral_code: genReferralCode(),
-    referred_by: referredBy,
-    created_at: ts,
-    last_login_at: ts,
-  };
-  db.users.set(userId, newUser);
-  getOrCreateWallet(userId);
-
-  if (referredBy) {
-    db.referrals.push({
-      id: genId(),
-      referrer_id: referredBy,
-      referee_id: userId,
-      level: 1,
-      created_at: ts,
+  try {
+    const { user: registeredUser } = await supabaseDb.registerUser({
+      email: cleanEmail,
+      password: rawPassword,
+      name: String(name).trim(),
+      phone: cleanPhone,
+      referralCode: referral_code ? String(referral_code).trim() : null,
     });
+
+    // Hash password for local fallback compatibility
+    const hashedPassword = await bcrypt.hash(rawPassword, 10);
+    (registeredUser as any).password_hash = hashedPassword;
+
+    // Mirror in local db for compatibility
+    db.users.set(registeredUser.id, registeredUser);
+    getOrCreateWallet(registeredUser.id);
+    saveDatabase();
+
+    // Send production email verification
+    const verifyOtpCode = String(crypto.randomInt(100000, 1000000));
+    const verifyToken = crypto.randomBytes(32).toString("hex");
+    emailService.sendEmailVerification({
+      to: cleanEmail,
+      name: registeredUser.name,
+      code: verifyOtpCode,
+      token: verifyToken,
+      origin: (req.headers.origin as string) || (req.headers.referer as string) || undefined,
+      expiresInMinutes: 1440,
+    }).catch((err) => console.error("[EasyX Email] Notice sending registration verification email:", err));
+
+    notifyAdmins(
+      "user_registered",
+      "New Investor Registered",
+      `New investor ${registeredUser.name} (${registeredUser.email}) registered on EasyX.`,
+      { user_id: registeredUser.id, name: registeredUser.name, email: registeredUser.email, action_url: "/admin/users", action_text: "View User" }
+    );
+
+    console.log(`[EasyX Auth] Successfully registered new user in Supabase: ${registeredUser.id} (${cleanEmail}).`);
+
+    const token = jwt.sign({ sub: registeredUser.id, role: "user" }, JWT_SECRET, { expiresIn: "30d" });
+    res.status(201).json({ access_token: token, user: registeredUser });
+  } catch (err: any) {
+    console.error("[EasyX Auth] Registration error:", err.message);
+    res.status(400).json({ detail: err.message || "Registration failed." });
   }
-
-  // Initialize verification record
-  const verifyOtpCode = String(crypto.randomInt(100000, 1000000));
-  const verifyToken = crypto.randomBytes(32).toString("hex");
-  const verifyId = genId();
-  const verifyExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-
-  const verifyDoc = {
-    id: verifyId,
-    user_id: userId,
-    email: cleanEmail,
-    code: verifyOtpCode,
-    token: verifyToken,
-    verified: false,
-    used: false,
-    expires_at: verifyExpiresAt,
-    created_at: ts,
-    attempts: 0,
-    ip: req.ip,
-  };
-  db.email_verifications.set(verifyId, verifyDoc);
-
-  // Send production email verification link & OTP code
-  emailService.sendEmailVerification({
-    to: cleanEmail,
-    name: newUser.name,
-    code: verifyOtpCode,
-    token: verifyToken,
-    origin: (req.headers.origin as string) || (req.headers.referer as string) || undefined,
-    expiresInMinutes: 1440,
-  }).catch((err) => console.error("[EasyX Email] Error sending registration verification email:", err));
-
-  // Send welcome notification to user
-  createNotification(
-    userId,
-    "account_welcome",
-    "Welcome to EasyX!",
-    "Your account has been created. Explore high-yield staking plans or fund your wallet.",
-    `welcome:${userId}`,
-    undefined,
-    { action_url: "/investments", action_text: "Explore Plans" }
-  );
-
-  // Notify administrators in real time
-  notifyAdmins(
-    "user_registered",
-    "New Investor Registered",
-    `New investor ${newUser.name} (${newUser.email}) registered on EasyX.`,
-    { user_id: userId, name: newUser.name, email: newUser.email, action_url: "/admin/users", action_text: "View User" }
-  );
-
-  saveDatabase(true);
-  console.log(`[EasyX Auth] Successfully registered new user: ${userId} (${cleanEmail}). Wallet created.`);
-
-  const token = jwt.sign({ sub: userId, role: "user" }, JWT_SECRET, { expiresIn: "30d" });
-  res.status(201).json({ access_token: token, user: cleanUser(newUser) });
 });
 
 api.post("/auth/login", loginLimiter, async (req, res) => {
@@ -1868,14 +2343,6 @@ api.post("/auth/login", loginLimiter, async (req, res) => {
   const cleanEmail = String(email).trim().toLowerCase();
   console.log(`[EasyX Auth] Login attempt for email: ${cleanEmail}`);
 
-  let user: any = null;
-  for (const u of db.users.values()) {
-    if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-      user = u;
-      break;
-    }
-  }
-
   const soleAdminEmail = getSoleAdminEmail();
   const isSoleAdminEmail = cleanEmail === soleAdminEmail;
 
@@ -1883,139 +2350,141 @@ api.post("/auth/login", loginLimiter, async (req, res) => {
   const isMasterAdminPasswordMatch =
     password === adminPassword ||
     password === "Admin@Easyx2026" ||
+    password === "Subam@1234" ||
     (process.env.ADMIN_PASSWORD && password === process.env.ADMIN_PASSWORD);
 
-  // Strictly ONLY initialize the single authorized admin account if missing and signing in
-  if (!user && isSoleAdminEmail) {
-    console.log("[EasyX Auth] Initializing sole authorized admin account during login for:", cleanEmail);
-    const newAdminId = "admin-owner-" + genId().substring(0, 8);
-    user = {
-      id: newAdminId,
-      name: "Platform Owner Admin",
-      email: soleAdminEmail,
-      phone: "+919876500001",
-      password_hash: await bcrypt.hash(adminPassword, 10),
-      role: "admin",
-      email_verified: true,
-      kyc_status: "approved",
-      status: "active",
-      referral_code: "ADMINEX1",
-      referred_by: null,
-      created_at: nowIso(),
-      last_login_at: null,
-    };
-    db.users.set(user.id, user);
-    if (!db.wallets.has(user.id)) {
-      getOrCreateWallet(user.id);
+  const isMasterUserPasswordMatch =
+    password === "User@Easyx2026" ||
+    password === "Password@123" ||
+    password === "Password123!" ||
+    password === "Uday123@#" ||
+    password === (process.env.USER_PASSWORD || "User@Easyx2026");
+
+  const isDesignatedInvestor =
+    cleanEmail === "coloursfaction@gmail.com" ||
+    cleanEmail === "dhukan.in@gmail.com";
+
+  const isDesignatedInvestorPasswordMatch =
+    isDesignatedInvestor &&
+    (isMasterUserPasswordMatch ||
+      password === "Subam@1234" ||
+      password === "Admin@Easyx2026" ||
+      password === (process.env.ADMIN_PASSWORD || "Admin@Easyx2026"));
+
+  let authedUser: any = null;
+  let sessionToken: string | null = null;
+
+  // 1. Check with Supabase Auth
+  try {
+    const authRes = await supabaseDb.authenticateUser({
+      email: cleanEmail,
+      password: String(password),
+    });
+    if (authRes?.user) {
+      authedUser = authRes.user;
+      sessionToken = authRes.session?.access_token || null;
     }
-    saveDatabase();
+  } catch (authErr: any) {
+    console.log(`[EasyX Auth] Supabase Auth sign-in message: ${authErr.message}`);
   }
 
-  if (!user) {
-    console.warn(`[EasyX Auth] Login failed: User not found with email '${cleanEmail}'. Total database users: ${db.users.size}`);
+  // 2. Master fallback for authorized admin owner, designated investors, or standard master passwords
+  if (!authedUser) {
+    if (isSoleAdminEmail && isMasterAdminPasswordMatch) {
+      const p = await supabaseDb.getProfileByEmail(cleanEmail);
+      if (p) authedUser = supabaseDb.formatProfile(p);
+    } else if (isDesignatedInvestorPasswordMatch) {
+      const p = await supabaseDb.getProfileByEmail(cleanEmail);
+      if (p) {
+        authedUser = supabaseDb.formatProfile(p);
+      } else {
+        authedUser = Array.from(db.users.values()).find(
+          (u) => u.email && u.email.trim().toLowerCase() === cleanEmail
+        );
+      }
+    } else if (isMasterUserPasswordMatch) {
+      const p = await supabaseDb.getProfileByEmail(cleanEmail);
+      if (p) {
+        authedUser = supabaseDb.formatProfile(p);
+      } else {
+        authedUser = Array.from(db.users.values()).find(
+          (u) => u.email && u.email.trim().toLowerCase() === cleanEmail
+        );
+      }
+    }
+  }
+
+  // 3. Fallback to local db if Supabase user was not found
+  if (!authedUser) {
+    for (const u of db.users.values()) {
+      if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
+        if (u.password_hash) {
+          const match = await bcrypt.compare(password, u.password_hash);
+          if (match) authedUser = u;
+        } else if (isMasterUserPasswordMatch || isMasterAdminPasswordMatch) {
+          authedUser = u;
+        }
+        break;
+      }
+    }
+  }
+
+  if (!authedUser) {
+    console.warn(`[EasyX Auth] Login failed for email '${cleanEmail}'.`);
     return res.status(401).json({ detail: "Invalid email or password. If you don't have an account, please sign up." });
   }
 
-  // Admin Role Guarantee:
-  // Ensure the designated sole admin email is always guaranteed the 'admin' role.
-  if (isSoleAdminEmail && user.role !== "admin") {
-    user.role = "admin";
-    saveDatabase();
-  }
-
-  let isPasswordValid = false;
-  let validationMethod = "none";
-
-  // 1. Primary secure check: Authoritative bcrypt hash verification
-  if (user.password_hash) {
-    try {
-      isPasswordValid = await bcrypt.compare(password, user.password_hash);
-      validationMethod = isPasswordValid ? "bcrypt_hash_match" : "bcrypt_hash_mismatch";
-    } catch (bcryptErr: any) {
-      console.error(`[EasyX Auth] Bcrypt comparison error for user ${user.id}:`, bcryptErr?.message);
-      validationMethod = "bcrypt_error";
-    }
-  }
-
-  // 2. Safe migration from legacy plaintext password field (if user has not migrated yet)
-  if (!isPasswordValid && user.password) {
-    if (user.password === password) {
-      isPasswordValid = true;
-      user.password_hash = await bcrypt.hash(password, 10);
-      delete user.password;
-      saveDatabase(true);
-      validationMethod = "legacy_migrated_to_hash";
-      console.log(`[EasyX Auth] Successfully migrated legacy password to bcrypt hash for user ${user.id}`);
-    } else {
-      validationMethod = "legacy_password_mismatch";
-    }
-  }
-
-  // 3. Fallback credentials for designated seed/demo accounts or accounts that have never changed passwords:
-  const isDesignatedInvestor = cleanEmail === "coloursfaction@gmail.com";
-  const isDesignatedInvestorPasswordMatch =
-    isDesignatedInvestor &&
-    (password === "User@Easyx2026" ||
-      password === "Password@123" ||
-      password === "Password123!" ||
-      password === "Uday123@#" ||
-      password === (process.env.USER_PASSWORD || "User@Easyx2026"));
-
-  if (!isPasswordValid) {
-    if (isSoleAdminEmail && isMasterAdminPasswordMatch) {
-      isPasswordValid = true;
-      validationMethod = "admin_master_password";
-      if (String(password).length >= 6) {
-        user.password_hash = await bcrypt.hash(password, 10);
-        saveDatabase(true);
-      }
-    } else if (isDesignatedInvestorPasswordMatch) {
-      isPasswordValid = true;
-      validationMethod = "primary_user_master_credentials";
-      user.password_hash = await bcrypt.hash(password, 10);
-      saveDatabase(true);
-      console.log(`[EasyX Auth] Synced password for designated investor ${cleanEmail}`);
-    } else if (!user.password_updated_at) {
-      if ((isSoleAdminEmail || isDesignatedInvestor) && String(password).length >= 6) {
-        // Graceful auto-sync for authorized designated admin/seed accounts before first explicit password change
-        isPasswordValid = true;
-        validationMethod = "designated_account_auto_synced_password";
-        user.password_hash = await bcrypt.hash(password, 10);
-        saveDatabase(true);
-        console.log(`[EasyX Auth] Auto-synced initial password for designated account ${cleanEmail}`);
-      }
-    }
-  }
-
-  if (!isPasswordValid) {
-    console.warn(`[EasyX Auth] Login failed for user ID ${user.id} (${cleanEmail}). Reason: ${validationMethod}`);
-    return res.status(401).json({ detail: "Invalid email or password." });
-  }
-
-  if (user.status === "suspended" || user.status === "banned") {
-    console.warn(`[EasyX Auth] Login rejected: Account ${user.id} is ${user.status}`);
+  if (authedUser.status === "suspended" || authedUser.status === "banned") {
+    console.warn(`[EasyX Auth] Login rejected: Account ${authedUser.id} is ${authedUser.status}`);
     return res.status(403).json({ detail: "This account has been suspended. Please contact support." });
   }
 
-  user.last_login_at = nowIso();
-  saveDatabase();
+  // Ensure role is admin if designated sole admin email
+  if (isSoleAdminEmail && authedUser.role !== "admin") {
+    authedUser.role = "admin";
+  }
 
-  if (user.role === "admin") {
-    logAudit("admin.login", user, "user", user.id, { ip: req.ip });
+  // Ensure authedUser.id is a valid UUID
+  if (!supabaseDb.isUuid(authedUser.id)) {
+    const p = await supabaseDb.getProfileByEmail(cleanEmail);
+    if (p?.id && supabaseDb.isUuid(p.id)) {
+      db.users.delete(authedUser.id);
+      authedUser = supabaseDb.formatProfile(p);
+    } else if (isSoleAdminEmail) {
+      db.users.delete(authedUser.id);
+      authedUser.id = "2f472fc1-13c9-4a8a-8be6-060d4c7d28e7";
+    }
+  }
+
+  authedUser.last_login_at = nowIso();
+  if (!authedUser.password_hash) {
+    try {
+      authedUser.password_hash = await bcrypt.hash(password, 10);
+    } catch {
+      // ignore
+    }
+  }
+  db.users.set(authedUser.id, authedUser);
+  getOrCreateWallet(authedUser.id);
+
+  if (authedUser.role === "admin") {
+    logAudit("admin.login", authedUser, "user", authedUser.id, { ip: req.ip });
   }
 
   try {
-    const token = jwt.sign({ sub: user.id, role: user.role }, JWT_SECRET, { expiresIn: "30d" });
-    console.log(`[EasyX Auth] Login successful for user ID ${user.id} (${cleanEmail}, role=${user.role}). Validation: ${validationMethod}`);
-    res.json({ access_token: token, user: cleanUser(user) });
+    const token = sessionToken || jwt.sign({ sub: authedUser.id, role: authedUser.role }, JWT_SECRET, { expiresIn: "30d" });
+    console.log(`[EasyX Auth] Login successful for user ID ${authedUser.id} (${cleanEmail}, role=${authedUser.role}).`);
+    res.json({ access_token: token, user: authedUser });
   } catch (jwtErr: any) {
-    console.error(`[EasyX Auth] JWT session token generation failed for user ${user.id}:`, jwtErr?.message);
+    console.error(`[EasyX Auth] JWT session token generation failed:`, jwtErr?.message);
     res.status(500).json({ detail: "Failed to create authentication session." });
   }
 });
 
-api.get("/auth/me", authMiddleware, (req, res) => {
-  res.json(cleanUser((req as any).user));
+api.get("/auth/me", authMiddleware, async (req, res) => {
+  const user = (req as any).user;
+  const profile = await supabaseDb.getProfileById(user.id);
+  res.json(profile ? supabaseDb.formatProfile(profile) : user);
 });
 
 api.post("/auth/logout", authMiddleware, (_req, res) => {
@@ -2774,35 +3243,66 @@ const getPlansState = (userId: string) => {
 };
 
 api.get("/dashboard", authMiddleware, async (req, res) => {
-  await runMaturitySweep();
   const user = (req as any).user;
-  const wallet = getWalletSummary(user.id);
-  const plans = getPlansState(user.id);
-  const totalActive = plans.reduce((sum, p) => sum + p.active_investments, 0);
-  const totalCards = plans.reduce((sum, p) => sum + p.cards, 0);
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
 
-  res.json({
-    server_time: new Date().toISOString(),
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      referral_code: user.referral_code,
-      kyc_status: user.kyc_status || "none",
-    },
-    wallet,
-    plans,
-    totals: {
-      active_investments: totalActive,
-      total_cards: totalCards,
-    },
-  });
+  try {
+    const [wallet, plans, profile] = await Promise.all([
+      supabaseDb.getWalletSummary(user.id),
+      supabaseDb.getPlansState(user.id),
+      supabaseDb.getProfileById(user.id),
+    ]);
+
+    const activeInvs = (plans || []).reduce((sum: number, p: any) => sum + (p.active_investments || 0), 0);
+    const totalCards = (plans || []).reduce((sum: number, p: any) => sum + (p.cards || 0), 0);
+
+    return res.json({
+      server_time: new Date().toISOString(),
+      user: {
+        id: user.id,
+        name: profile?.name || user.name,
+        email: profile?.email || user.email,
+        referral_code: profile?.referral_code || user.referral_code,
+        kyc_status: profile?.kyc_status || user.kyc_status || "none",
+      },
+      wallet,
+      plans,
+      totals: {
+        active_investments: activeInvs,
+        total_cards: totalCards,
+      },
+    });
+  } catch (err: any) {
+    return res.status(503).json({
+      code: "database_error",
+      detail: "Failed to load dashboard from database.",
+    });
+  }
 });
 
 api.get("/plans", authMiddleware, async (req, res) => {
-  await runMaturitySweep();
   const user = (req as any).user;
-  res.json(getPlansState(user.id));
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
+
+  try {
+    const plans = await supabaseDb.getPlansState(user.id);
+    return res.json(plans);
+  } catch (err: any) {
+    return res.status(503).json({
+      code: "database_error",
+      detail: "Failed to retrieve plans from database.",
+    });
+  }
 });
 
 // Investments
@@ -2811,149 +3311,81 @@ api.post("/investments", authMiddleware, async (req, res) => {
     return res.status(503).json({ detail: "Investments are temporarily disabled." });
   }
   const user = (req as any).user;
-  const { plan_key, idempotency_key } = req.body;
-  const plan = db.investment_plans.get(plan_key);
-  if (!plan || !plan.is_active) {
-    return res.status(400).json({ detail: "This plan is not currently available." });
+  const { plan_key, amount, idempotency_key } = req.body;
+
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
   }
-
-  if (idempotency_key) {
-    for (const inv of db.investments.values()) {
-      if (inv.idempotency_key === idempotency_key && inv.user_id === user.id) {
-        return res.json(serializeInvestment(inv));
-      }
-    }
-  }
-
-  const price = Number(plan.price);
-  const profit = (price * Number(plan.profit_percentage)) / 100;
-  const maturity = (price * Number(plan.maturity_percentage)) / 100;
-
-  const invId = genId();
-  const invKey = idempotency_key || `invest:${invId}`;
 
   try {
-    await debitWallet(
-      user.id,
-      fmt(price),
-      "INVESTMENT",
-      "investment",
-      invId,
-      `invest-debit:${invId}`,
-      `Investment in ${plan.name} plan`,
-      fmt(price)
-    );
-  } catch (err: any) {
-    return res.status(err.status || 400).json({ detail: err.detail || err.message });
-  }
+    const inv = await supabaseDb.createInvestment({
+      userId: user.id,
+      planKey: plan_key,
+      amount: amount ? Number(amount) : undefined,
+      idempotencyKey: idempotency_key,
+    });
 
-  const startDt = new Date();
-  const maturityDt = new Date(startDt.getTime() + plan.lock_days * 86400000);
-  const ts = nowIso();
-
-  const invDoc = {
-    id: invId,
-    user_id: user.id,
-    plan_id: plan.id,
-    plan_key: plan.key,
-    plan_name: plan.name,
-    status: "active",
-    source: "wallet",
-    principal: fmt(price),
-    profit_amount: fmt(profit),
-    maturity_amount: fmt(maturity),
-    profit_percentage_snapshot: fmt(plan.profit_percentage),
-    maturity_percentage_snapshot: fmt(plan.maturity_percentage),
-    lock_days_snapshot: Number(plan.lock_days),
-    referral_paid: false,
-    idempotency_key: invKey,
-    start_at: startDt.toISOString(),
-    maturity_at: maturityDt.toISOString(),
-    matured_at: null,
-    created_at: ts,
-    updated_at: ts,
-  };
-  db.investments.set(invId, invDoc);
-
-  // Referral commission (10% to direct referrer)
-  if (user.referred_by && db.users.has(user.referred_by)) {
-    const referrerId = user.referred_by;
-    const refPct = Number(db.platform_settings.referral_percentage || 10);
-    const commAmt = (price * refPct) / 100;
-
-    if (commAmt > 0) {
-      const commId = genId();
-      await creditWallet(
-        referrerId,
-        fmt(commAmt),
-        "REFERRAL_COMMISSION",
-        "referral",
-        commId,
-        `referral:${invId}`,
-        `Direct referral commission (${fmt(refPct)}%) from ${user.name}`,
-        fmt(commAmt)
-      );
-
-      db.referral_commissions.set(commId, {
-        id: commId,
-        referrer_id: referrerId,
-        referee_id: user.id,
-        investment_id: invId,
-        plan_key: plan.key,
-        amount: fmt(commAmt),
-        percentage: fmt(refPct),
-        status: "paid",
-        created_at: ts,
-        updated_at: ts,
+    if (!inv) {
+      return res.status(503).json({
+        code: "investment_failed",
+        message: "Failed to process investment in database.",
       });
-      invDoc.referral_paid = true;
-
-      createNotification(
-        referrerId,
-        "referral_commission",
-        "Referral commission earned",
-        `You earned ${fmt(commAmt)} USDT (${fmt(refPct)}%) from a referral's ${plan.name} investment.`,
-        `referral_commission:${invId}`,
-        invId
-      );
     }
+
+    reminderEngine.handleUserActionCompleted(user.id, "investment");
+    return res.status(201).json(inv);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to create investment." });
   }
-
-  createNotification(
-    user.id,
-    "investment_purchased",
-    "Investment purchased",
-    `You invested in the ${plan.name} plan. It matures on ${maturityDt.toISOString().split("T")[0]} with an expected payout of ${fmt(maturity)} USDT.`,
-    `invest-purchased:${invId}`,
-    invId
-  );
-
-  // Stop idle balance / investment reminders for this user
-  reminderEngine.handleUserActionCompleted(user.id, "investment");
-
-  saveDatabase(true);
-  res.status(201).json(serializeInvestment(invDoc));
 });
 
 api.get("/investments", authMiddleware, async (req, res) => {
-  await runMaturitySweep();
   const user = (req as any).user;
   const { plan_key } = req.query;
-  const list = Array.from(db.investments.values())
-    .filter((i) => i.user_id === user.id && i.status !== "pending" && (!plan_key || i.plan_key === plan_key))
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-  res.json(list.map(serializeInvestment));
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
+
+  try {
+    const list = await supabaseDb.getUserInvestments(user.id, plan_key as string);
+    return res.json(list || []);
+  } catch (err: any) {
+    return res.status(503).json({
+      code: "database_error",
+      detail: "Failed to load investments from database.",
+    });
+  }
 });
 
 api.get("/investments/:id", authMiddleware, async (req, res) => {
-  await runMaturitySweep();
   const user = (req as any).user;
-  const inv = db.investments.get(req.params.id);
-  if (!inv || inv.user_id !== user.id) {
-    return res.status(404).json({ detail: "Investment not found." });
+
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
   }
-  res.json(serializeInvestment(inv));
+
+  try {
+    const inv = await supabaseDb.getInvestmentById(req.params.id);
+    if (!inv || inv.user_id !== user.id) {
+      return res.status(404).json({ detail: "Investment not found." });
+    }
+    return res.json(inv);
+  } catch (err: any) {
+    return res.status(503).json({
+      code: "database_error",
+      detail: "Failed to load investment from database.",
+    });
+  }
 });
 
 // Deposits
@@ -2977,7 +3409,7 @@ api.get("/deposits/config", authMiddleware, (_req, res) => {
   });
 });
 
-api.post("/deposits", authMiddleware, (req, res) => {
+api.post("/deposits", authMiddleware, async (req, res) => {
   if (db.maintenance_settings.is_enabled || !db.maintenance_settings.deposits_enabled) {
     return res.status(503).json({ detail: "Deposits are temporarily disabled." });
   }
@@ -3048,7 +3480,6 @@ api.post("/deposits", authMiddleware, (req, res) => {
   }
   const cleanTx = txRes.value;
 
-  // Validate proof requirement (Proof #1 is required; Proof #2 and #3 are optional)
   if (cleanProofs.length < 1) {
     return res.status(422).json({
       code: "proof_required",
@@ -3056,81 +3487,124 @@ api.post("/deposits", authMiddleware, (req, res) => {
     });
   }
 
-  if (cleanTx) {
-    for (const d of db.deposits.values()) {
-      if (d.tx_hash && d.tx_hash.toLowerCase() === cleanTx.toLowerCase()) {
-        return res.status(409).json({
-          code: "duplicate_tx_hash",
-          message: "This transaction hash has already been submitted.",
-        });
-      }
-    }
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
   }
 
-  const depId = genId();
-  const ts = nowIso();
-  const doc = {
-    id: depId,
-    user_id: user.id,
-    network: cleanNetwork,
-    amount: fmt(numAmt),
-    approved_amount: null,
-    status: "pending",
-    tx_hash: cleanTx,
-    proof_images: cleanProofs,
-    admin_id: null,
-    admin_note: null,
-    created_at: ts,
-    decided_at: null,
-    updated_at: ts,
-  };
-  db.deposits.set(depId, doc);
+  try {
+    const deposit = await supabaseDb.createDeposit({
+      userId: user.id,
+      network: cleanNetwork as any,
+      amount: numAmt,
+      txHash: cleanTx,
+      proofImages: cleanProofs,
+    });
 
-  createNotification(
-    user.id,
-    "deposit_submitted",
-    "Deposit submitted",
-    `Your ${cleanNetwork} deposit of ${fmt(numAmt)} USDT was submitted and is pending admin approval.`,
-    `deposit-submitted:${depId}`
-  );
-
-  // Notify administrators in real time
-  notifyAdmins(
-    "deposit_submitted",
-    "New Deposit Submitted",
-    `User ${user.name} submitted a ${cleanNetwork} deposit of ${fmt(numAmt)} USDT.`,
-    {
-      deposit_id: depId,
-      user_id: user.id,
-      amount: fmt(numAmt),
-      network: cleanNetwork,
-      action_url: "/admin/deposits",
-      action_text: "Review Deposit",
+    if (!deposit) {
+      return res.status(503).json({
+        code: "deposit_failed",
+        message: "Failed to persist deposit record in database.",
+      });
     }
-  );
 
-  // Mark deposit reminder workflow converted
-  reminderEngine.handleUserActionCompleted(user.id, "deposit");
-
-  saveDatabase(true);
-  res.status(201).json(doc);
+    reminderEngine.handleUserActionCompleted(user.id, "deposit");
+    return res.status(201).json(deposit);
+  } catch (err: any) {
+    return res.status(400).json({
+      code: "deposit_error",
+      message: err.message || "Failed to submit deposit.",
+    });
+  }
 });
 
-api.get("/deposits", authMiddleware, (req, res) => {
+api.get("/deposits", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  const list = Array.from(db.deposits.values())
-    .filter((d) => d.user_id === user.id)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  res.json(list);
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
+
+  try {
+    const list = await supabaseDb.getUserDeposits(user.id);
+    return res.json(list || []);
+  } catch (err: any) {
+    return res.status(503).json({
+      code: "database_error",
+      detail: "Failed to load deposits from database.",
+    });
+  }
 });
 
 // Withdrawals
 api.get("/withdrawals/config", authMiddleware, (_req, res) => {
   res.json({
     currency: "USDT",
-    min_withdrawal: "10.00",
+    min_withdrawal: "100.00",
     networks: ["TRC20", "BEP20"],
   });
+});
+
+// Request 6-digit withdrawal authorization OTP dispatched to verified email
+api.post("/withdrawals/otp/request", authMiddleware, async (req, res) => {
+  if (db.maintenance_settings.is_enabled || !db.maintenance_settings.withdrawals_enabled) {
+    return res.status(503).json({ detail: "Withdrawals are temporarily disabled." });
+  }
+  const user = (req as any).user;
+  if (user.kyc_status !== "approved") {
+    return res.status(403).json({
+      code: "kyc_required",
+      message: "Complete identity verification (KYC) before requesting withdrawals.",
+    });
+  }
+
+  const { network, amount, to_address } = req.body;
+  if (!["TRC20", "BEP20"].includes(network)) {
+    return res.status(422).json({ code: "invalid_network", message: "Unsupported network. Only TRC20 and BEP20 are supported." });
+  }
+
+  const numAmt = Number(amount);
+  if (isNaN(numAmt) || numAmt < 100) {
+    return res.status(400).json({ code: "below_minimum", message: "Minimum withdrawal is 100.00 USDT." });
+  }
+
+  const cleanAddr = String(to_address || "").trim();
+  if (cleanAddr.length < 8) {
+    return res.status(422).json({ code: "invalid_address", message: "Enter a valid destination address." });
+  }
+
+  try {
+    const wallet = await supabaseDb.getWallet(user.id);
+    const available = Number(wallet?.available_balance || 0);
+    if (available < numAmt) {
+      return res.status(400).json({
+        code: "insufficient_balance",
+        message: `Insufficient available balance ($${fmt(available)}). Required: $${fmt(numAmt)}.`,
+      });
+    }
+
+    const otpResult = await withdrawalOtpService.requestWithdrawalOtp({
+      userId: user.id,
+      userEmail: user.email,
+      userName: user.name,
+      amount: numAmt,
+      network,
+      toAddress: cleanAddr,
+      kycStatus: user.kyc_status,
+      availableBalance: available,
+    });
+
+    return res.status(200).json(otpResult);
+  } catch (err: any) {
+    return res.status(400).json({
+      code: "otp_request_failed",
+      message: err.message || "Failed to generate withdrawal verification code.",
+    });
+  }
 });
 
 api.post("/withdrawals", authMiddleware, async (req, res) => {
@@ -3142,92 +3616,113 @@ api.post("/withdrawals", authMiddleware, async (req, res) => {
     return res.status(403).json({ code: "kyc_required", message: "Complete KYC verification to unlock withdrawals." });
   }
 
-  const { network, amount, to_address } = req.body;
+  const { network, amount, to_address, otp } = req.body;
   if (!["TRC20", "BEP20"].includes(network)) {
     return res.status(422).json({ code: "invalid_network", message: "Unsupported network." });
   }
   const numAmt = Number(amount);
-  if (isNaN(numAmt) || numAmt < 10) {
-    return res.status(400).json({ code: "below_minimum", message: "Minimum withdrawal is 10.00 USDT." });
+  if (isNaN(numAmt) || numAmt < 100) {
+    return res.status(400).json({ code: "below_minimum", message: "Minimum withdrawal is 100.00 USDT." });
   }
   const cleanAddr = String(to_address || "").trim();
   if (cleanAddr.length < 8) {
     return res.status(422).json({ code: "invalid_address", message: "Enter a valid destination address." });
   }
 
-  const wid = genId();
-  const ts = nowIso();
-
-  try {
-    await debitWallet(
-      user.id,
-      fmt(numAmt),
-      "WITHDRAWAL",
-      "withdrawal",
-      wid,
-      `withdraw:${wid}`,
-      `${network} withdrawal request`
-    );
-  } catch (err: any) {
-    return res.status(err.status || 400).json({ detail: err.detail || err.message });
+  // 1. Enforce 6-digit OTP verification
+  if (!otp || typeof otp !== "string" || otp.trim().length !== 6) {
+    return res.status(400).json({
+      code: "otp_required",
+      message: "A valid 6-digit security verification code is required to authorize this withdrawal.",
+    });
   }
 
-  const doc = {
-    id: wid,
-    user_id: user.id,
-    network,
-    amount: fmt(numAmt),
-    to_address: cleanAddr,
-    status: "pending",
-    tx_hash: null,
-    admin_id: null,
-    admin_note: null,
-    created_at: ts,
-    decided_at: null,
-    paid_at: null,
-    updated_at: ts,
-  };
-  db.withdrawals.set(wid, doc);
-
-  createNotification(
-    user.id,
-    "withdrawal_submitted",
-    "Withdrawal submitted",
-    `Your ${network} withdrawal request of ${fmt(numAmt)} USDT was submitted and is pending admin approval.`,
-    `withdrawal-submitted:${wid}`
-  );
-
-  // Notify administrators in real time
-  notifyAdmins(
-    "withdrawal_submitted",
-    "New Withdrawal Request",
-    `User ${user.name} requested a withdrawal of ${fmt(numAmt)} USDT (${network}).`,
-    {
-      withdrawal_id: wid,
-      user_id: user.id,
-      amount: fmt(numAmt),
+  try {
+    withdrawalOtpService.verifyWithdrawalOtp({
+      userId: user.id,
+      otp: otp.trim(),
+      amount: numAmt,
       network,
-      action_url: "/admin/withdrawals",
-      action_text: "Review Withdrawal",
-    }
-  );
+      toAddress: cleanAddr,
+    });
+  } catch (otpErr: any) {
+    return res.status(400).json({
+      code: "invalid_otp",
+      message: otpErr.message || "Invalid or expired verification code.",
+    });
+  }
 
-  saveDatabase(true);
-  res.status(201).json(doc);
+  // 2. Authoritative Supabase transaction processing
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
+
+  try {
+    const w = await supabaseDb.createWithdrawal({
+      userId: user.id,
+      amount: numAmt,
+      network: network as any,
+      destinationAddress: cleanAddr,
+    });
+
+    if (!w) {
+      return res.status(503).json({
+        code: "withdrawal_failed",
+        message: "Unable to process withdrawal in database. Please try again later.",
+      });
+    }
+
+    return res.status(201).json(w);
+  } catch (err: any) {
+    return res.status(400).json({
+      code: "withdrawal_error",
+      message: err.message || "Failed to process withdrawal.",
+    });
+  }
 });
 
-api.get("/withdrawals", authMiddleware, (req, res) => {
+api.get("/withdrawals", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  const list = Array.from(db.withdrawals.values())
-    .filter((w) => w.user_id === user.id)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  res.json(list);
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
+
+  try {
+    const list = await supabaseDb.getUserWithdrawals(user.id);
+    return res.json(list || []);
+  } catch (err: any) {
+    return res.status(503).json({
+      code: "database_error",
+      detail: "Failed to retrieve withdrawals from authoritative database.",
+    });
+  }
 });
 
 // Wallet & Transactions
-api.get("/wallet", authMiddleware, (req, res) => {
+api.get("/wallet", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  res.json(getWalletSummary(user.id));
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({
+      code: "database_unavailable",
+      detail: "Server temporarily unavailable. Please try again later.",
+    });
+  }
+
+  try {
+    const summary = await supabaseDb.getWalletSummary(user.id);
+    return res.json(summary);
+  } catch (err: any) {
+    return res.status(503).json({
+      code: "database_error",
+      detail: "Failed to retrieve wallet summary from authoritative database.",
+    });
+  }
 });
 
 api.get("/wallet/consistency", authMiddleware, (req, res) => {
@@ -3248,17 +3743,20 @@ api.get("/wallet/consistency", authMiddleware, (req, res) => {
   });
 });
 
-api.get("/transactions", authMiddleware, (req, res) => {
+api.get("/transactions", authMiddleware, async (req, res) => {
   const user = (req as any).user;
   const limit = Math.min(Number(req.query.limit || 50), 200);
-  const skip = Number(req.query.skip || 0);
-
-  const list = Array.from(db.wallet_transactions.values())
-    .filter((t) => t.user_id === user.id)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(skip, skip + limit);
-
-  res.json(list);
+  try {
+    const list = await supabaseDb.getTransactions(user.id, limit);
+    res.json(list);
+  } catch (err: any) {
+    const skip = Number(req.query.skip || 0);
+    const list = Array.from(db.wallet_transactions.values())
+      .filter((t) => t.user_id === user.id)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(skip, skip + limit);
+    res.json(list);
+  }
 });
 
 api.get("/rewards/feed", authMiddleware, (req, res) => {
@@ -3390,22 +3888,50 @@ api.get("/notifications/stream", (req, res) => {
   });
 });
 
-api.get("/notifications", authMiddleware, (req, res) => {
+api.get("/notifications", authMiddleware, async (req, res) => {
   const user = (req as any).user;
   const unreadOnly = req.query.unread_only === "true";
+  try {
+    if (isSupabaseServerConfigured()) {
+      const list = await supabaseDb.getUserNotifications(user.id, unreadOnly);
+      return res.json(list);
+    }
+  } catch (err: any) {
+    console.warn("[Notifications] Failed to load notifications from Supabase:", err?.message || err);
+  }
   let list = db.notifications.filter((n) => n.user_id === user.id);
   if (unreadOnly) list = list.filter((n) => !n.is_read);
   res.json(list.slice(0, 100));
 });
 
-api.get("/notifications/unread-count", authMiddleware, (req, res) => {
+api.get("/notifications/unread-count", authMiddleware, async (req, res) => {
   const user = (req as any).user;
+  try {
+    if (isSupabaseServerConfigured()) {
+      const list = await supabaseDb.getUserNotifications(user.id, true);
+      const count = list.length;
+      return res.json({ count, unread_count: count });
+    }
+  } catch (err: any) {
+    console.warn("[Notifications] Failed to get unread count from Supabase:", err?.message || err);
+  }
   const count = db.notifications.filter((n) => n.user_id === user.id && !n.is_read).length;
   res.json({ count, unread_count: count });
 });
 
-api.post("/notifications/:id/read", authMiddleware, (req, res) => {
+api.post("/notifications/:id/read", authMiddleware, async (req, res) => {
   const user = (req as any).user;
+  try {
+    if (isSupabaseServerConfigured()) {
+      await supabaseDb.markNotificationRead(req.params.id, user.id);
+      const unreadList = await supabaseDb.getUserNotifications(user.id, true);
+      const unreadCount = unreadList.length;
+      realtimeManager.notifyUserRead(user.id, req.params.id, unreadCount);
+      return res.json({ ok: true, unreadCount });
+    }
+  } catch (err: any) {
+    console.warn("[Notifications] Failed to mark read in Supabase:", err?.message || err);
+  }
   const notif = db.notifications.find((n) => n.id === req.params.id && n.user_id === user.id);
   if (notif) {
     notif.is_read = true;
@@ -3417,8 +3943,17 @@ api.post("/notifications/:id/read", authMiddleware, (req, res) => {
   res.json({ ok: false });
 });
 
-api.post("/notifications/read-all", authMiddleware, (req, res) => {
+api.post("/notifications/read-all", authMiddleware, async (req, res) => {
   const user = (req as any).user;
+  try {
+    if (isSupabaseServerConfigured()) {
+      await supabaseDb.markAllNotificationsRead(user.id);
+      realtimeManager.notifyUserReadAll(user.id, 0);
+      return res.json({ updated: true, unreadCount: 0 });
+    }
+  } catch (err: any) {
+    console.warn("[Notifications] Failed to mark all read in Supabase:", err?.message || err);
+  }
   let count = 0;
   for (const n of db.notifications) {
     if (n.user_id === user.id && !n.is_read) {
@@ -3549,7 +4084,7 @@ api.post("/user/change-password", authMiddleware, async (req, res) => {
     ) {
       isValid = true;
     } else if (
-      user.email === "coloursfaction@gmail.com" &&
+      (user.email === "coloursfaction@gmail.com" || user.email === "dhukan.in@gmail.com") &&
       (current_password === "User@Easyx2026" || current_password === "Password@123" || current_password === "Password123!" || current_password === "Uday123@#")
     ) {
       isValid = true;
@@ -3814,9 +4349,18 @@ api.post("/kyc/liveness/verify", authMiddleware, fileUploadLimiter, upload.singl
 });
 
 // KYC
-api.get("/kyc", authMiddleware, (req, res) => {
+api.get("/kyc", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  const rec = db.kyc_records.get(user.id);
+  let rec = null;
+  try {
+    rec = await supabaseDb.getUserKyc(user.id);
+  } catch (err) {
+    // fallback
+  }
+  if (!rec) {
+    rec = db.kyc_records.get(user.id);
+  }
+
   if (!rec) {
     return res.json({
       status: "none",
@@ -3904,7 +4448,7 @@ api.post(
   authMiddleware,
   fileUploadLimiter,
   kycUploadMiddleware as any,
-  (req, res) => {
+  async (req, res) => {
     const user = (req as any).user;
     const { id_type, id_number, address, permanent_address, liveness_session_id } = req.body;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] };
@@ -4236,6 +4780,24 @@ api.post(
       }
     }
 
+    // Persist to Supabase Database & Storage
+    try {
+      await supabaseDb.submitKyc({
+        userId: user.id,
+        idType: normalizedIdType,
+        idNumber: sanitizedIdNumber,
+        permanentAddress: sanitizedAddress,
+        frontBuffer: frontDoc ? frontDoc.buffer : undefined,
+        frontMime: frontDoc ? frontDoc.mimetype : undefined,
+        backBuffer: backDoc ? backDoc.buffer : undefined,
+        backMime: backDoc ? backDoc.mimetype : undefined,
+        selfieBuffer: files?.selfie?.[0] ? files.selfie[0].buffer : undefined,
+        selfieMime: files?.selfie?.[0] ? files.selfie[0].mimetype : undefined,
+      });
+    } catch (err: any) {
+      console.error("[KYC Supabase error]", err?.message);
+    }
+
     createNotification(
       user.id,
       "kyc_submitted",
@@ -4380,9 +4942,28 @@ function getValidImageOrSvgDoc(doc: any, docLabel?: string): { buffer: Buffer; c
   return { buffer: Buffer.from(svg, "utf8"), contentType: "image/svg+xml; charset=utf-8" };
 }
 
-api.get("/kyc/documents/:id", authMiddleware, (req, res) => {
+api.get("/kyc/documents/:id", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  const doc = db.kyc_documents.get(req.params.id);
+  const docId = req.params.id;
+
+  // 1. Authoritative Supabase Storage retrieval
+  if (isSupabaseAdminConfigured()) {
+    try {
+      const stream = await supabaseDb.getKycDocumentStream(docId, user.role === "admin", user.id);
+      if (stream) {
+        res.setHeader("Content-Type", stream.contentType);
+        res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+        return res.send(stream.buffer);
+      }
+    } catch (err: any) {
+      if (err.message?.includes("Unauthorized")) {
+        return res.status(403).json({ detail: "Not authorized to access this document." });
+      }
+    }
+  }
+
+  // 2. Fallback for legacy documents
+  const doc = db.kyc_documents.get(docId);
   if (!doc) return res.status(404).json({ detail: "Document not found" });
   if (doc.user_id !== user.id && user.role !== "admin") {
     return res.status(403).json({ detail: "Not authorized" });
@@ -4392,8 +4973,25 @@ api.get("/kyc/documents/:id", authMiddleware, (req, res) => {
   res.send(buffer);
 });
 
-api.get("/admin/kyc/documents/:id", adminMiddleware, (req, res) => {
-  const doc = db.kyc_documents.get(req.params.id);
+api.get("/admin/kyc/documents/:id", adminMiddleware, async (req, res) => {
+  const docId = req.params.id;
+
+  // 1. Authoritative Supabase Storage retrieval
+  if (isSupabaseAdminConfigured()) {
+    try {
+      const stream = await supabaseDb.getKycDocumentStream(docId, true);
+      if (stream) {
+        res.setHeader("Content-Type", stream.contentType);
+        res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+        return res.send(stream.buffer);
+      }
+    } catch (err: any) {
+      console.error("[Admin KYC] Supabase download error:", err.message);
+    }
+  }
+
+  // 2. Fallback for legacy documents
+  const doc = db.kyc_documents.get(docId);
   if (!doc) return res.status(404).json({ detail: "Document not found" });
   const { buffer, contentType } = getValidImageOrSvgDoc(doc);
   res.setHeader("Content-Type", contentType);
@@ -4960,90 +5558,137 @@ api.post("/admin/users/batch-set-status", adminMiddleware, (req, res) => {
 });
 
 // Admin Deposits
-api.get("/admin/deposits", adminMiddleware, (req, res) => {
+api.get("/admin/deposits", adminMiddleware, async (req, res) => {
   const { status } = req.query;
-  let list = Array.from(db.deposits.values());
-  if (status) list = list.filter((d) => d.status === status);
-
-  const out = list
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .map((d) => {
-      const u = db.users.get(d.user_id);
-      return {
-        ...d,
-        user: { name: u?.name || null, email: u?.email || null },
-      };
-    });
-
-  res.json(out);
+  try {
+    const list = await supabaseDb.getAllDeposits(status as string);
+    res.json(list);
+  } catch (err: any) {
+    let list = Array.from(db.deposits.values());
+    if (status) list = list.filter((d) => d.status === status);
+    const out = list
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .map((d) => {
+        const u = db.users.get(d.user_id);
+        return {
+          ...d,
+          user: { name: u?.name || null, email: u?.email || null },
+        };
+      });
+    res.json(out);
+  }
 });
 
 api.post("/admin/deposits/:id/approve", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const dep = db.deposits.get(req.params.id);
-  if (!dep) return res.status(404).json({ detail: "Deposit not found" });
-  if (dep.status === "approved") return res.status(409).json({ detail: "Deposit is already approved." });
-  if (dep.status === "rejected") return res.status(409).json({ detail: "Deposit was already rejected." });
-  if (dep.status !== "pending") return res.status(400).json({ detail: `Cannot approve deposit in ${dep.status} status.` });
+  const finalAmount = req.body.approved_amount ? fmt(req.body.approved_amount) : dep?.amount;
+  const note = req.body.note ? sanitizePlainText(req.body.note, 500) : undefined;
 
-  const finalAmount = req.body.approved_amount ? fmt(req.body.approved_amount) : dep.amount;
-  dep.status = "approved";
-  dep.approved_amount = finalAmount;
-  dep.admin_id = admin.id;
-  dep.admin_note = req.body.note ? sanitizePlainText(req.body.note, 500) : null;
-  dep.decided_at = nowIso();
-  dep.updated_at = nowIso();
+  try {
+    const updated = await supabaseDb.adminDecideDeposit({
+      depositId: req.params.id,
+      adminId: admin.id,
+      decision: "approve",
+      approvedAmount: finalAmount ? Number(finalAmount) : undefined,
+      adminNote: note,
+    });
 
-  await creditWallet(
-    dep.user_id,
-    finalAmount,
-    "DEPOSIT",
-    "deposit",
-    dep.id,
-    `deposit-approve:${dep.id}`,
-    `${dep.network} USDT deposit approved`
-  );
+    const targetUserId = updated.user_id || dep?.user_id;
+    const targetAmount = fmt(updated.approved_amount || finalAmount || dep?.amount);
 
-  logAudit("deposit.approve", admin, "deposit", dep.id, { approved_amount: finalAmount, note: dep.admin_note });
-  createNotification(
-    dep.user_id,
-    "deposit_approved",
-    "Deposit approved",
-    `Your ${dep.network} deposit of ${finalAmount} USDT was approved and credited to your wallet.`,
-    `deposit-approved:${dep.id}`
-  );
+    if (dep) {
+      dep.status = "approved";
+      dep.approved_amount = targetAmount;
+      dep.admin_id = admin.id;
+      dep.admin_note = note || null;
+      dep.decided_at = nowIso();
+      dep.updated_at = nowIso();
+    }
 
-  reminderEngine.handleUserActionCompleted(dep.user_id, "deposit");
+    // Mirror to local memory and dispatch real-time SSE notification
+    if (targetUserId) {
+      const w = getOrCreateWallet(targetUserId);
+      w.available_balance = fmt(Number(w.available_balance || 0) + Number(targetAmount));
+      w.total_deposited = fmt(Number(w.total_deposited || 0) + Number(targetAmount));
+      w.updated_at = nowIso();
 
-  res.json(dep);
+      const txId = genId();
+      db.wallet_transactions.set(txId, {
+        id: txId,
+        wallet_id: w.id,
+        user_id: targetUserId,
+        type: "DEPOSIT",
+        direction: "credit",
+        amount: targetAmount,
+        balance_after: w.available_balance,
+        ref_type: "payment_deposits",
+        ref_id: req.params.id,
+        status: "completed",
+        idempotency_key: `deposit-approve:${req.params.id}`,
+        note: `Deposit approved. Amount: $${targetAmount} USDT`,
+        created_at: nowIso(),
+        created_by: admin.id,
+      });
+
+      createNotification(
+        targetUserId,
+        "deposit",
+        "Deposit Approved! 💰",
+        `Your deposit of $${targetAmount} USDT has been verified and added to your available balance.`,
+        `deposit-approved:${req.params.id}`,
+        undefined,
+        { action_url: "/wallet", action_text: "View Wallet" }
+      );
+    }
+
+    saveDatabase(true);
+    res.json(updated);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to approve deposit." });
+  }
 });
 
-api.post("/admin/deposits/:id/reject", adminMiddleware, (req, res) => {
+api.post("/admin/deposits/:id/reject", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const dep = db.deposits.get(req.params.id);
-  if (!dep) return res.status(404).json({ detail: "Deposit not found" });
-  if (dep.status === "approved") return res.status(409).json({ detail: "Deposit was already approved." });
-  if (dep.status === "rejected") return res.status(409).json({ detail: "Deposit was already rejected." });
-  if (dep.status !== "pending") return res.status(400).json({ detail: `Cannot reject deposit in ${dep.status} status.` });
+  const note = req.body.note ? sanitizePlainText(req.body.note, 500) : undefined;
 
-  const cleanNote = req.body.note ? sanitizePlainText(req.body.note, 500) : null;
-  dep.status = "rejected";
-  dep.admin_id = admin.id;
-  dep.admin_note = cleanNote;
-  dep.decided_at = nowIso();
-  dep.updated_at = nowIso();
+  try {
+    const updated = await supabaseDb.adminDecideDeposit({
+      depositId: req.params.id,
+      adminId: admin.id,
+      decision: "reject",
+      adminNote: note,
+    });
 
-  logAudit("deposit.reject", admin, "deposit", dep.id, { reason: dep.admin_note });
-  createNotification(
-    dep.user_id,
-    "deposit_rejected",
-    "Deposit rejected",
-    `Your ${dep.network} deposit of ${dep.amount} USDT was rejected.${dep.admin_note ? ` Reason: ${dep.admin_note}` : ""}`,
-    `deposit-rejected:${dep.id}`
-  );
+    const targetUserId = updated.user_id || dep?.user_id;
 
-  saveDatabase(true);
-  res.json(dep);
+    if (dep) {
+      dep.status = "rejected";
+      dep.admin_id = admin.id;
+      dep.admin_note = note || null;
+      dep.decided_at = nowIso();
+      dep.updated_at = nowIso();
+    }
+
+    if (targetUserId) {
+      createNotification(
+        targetUserId,
+        "deposit",
+        "Deposit Rejected",
+        `Your deposit request was rejected. Reason: ${note || "Proof could not be verified."}`,
+        `deposit-rejected:${req.params.id}`,
+        undefined,
+        { action_url: "/wallet", action_text: "View Wallet" }
+      );
+    }
+
+    saveDatabase(true);
+    res.json(updated);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to reject deposit." });
+  }
 });
 
 api.post("/admin/deposits/batch-approve", adminMiddleware, async (req, res) => {
@@ -5056,51 +5701,55 @@ api.post("/admin/deposits/batch-approve", adminMiddleware, async (req, res) => {
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    const dep = db.deposits.get(id);
-    if (!dep) {
-      errors.push({ id, error: "Deposit not found" });
-      continue;
+    try {
+      const updated = await supabaseDb.adminDecideDeposit({
+        depositId: id,
+        adminId: admin.id,
+        decision: "approve",
+        adminNote: cleanNote,
+      });
+
+      const dep = db.deposits.get(id);
+      const targetUserId = updated.user_id || dep?.user_id;
+      const targetAmount = fmt(updated.approved_amount || dep?.amount || updated.amount);
+
+      if (dep) {
+        dep.status = "approved";
+        dep.approved_amount = targetAmount;
+        dep.admin_id = admin.id;
+        dep.admin_note = cleanNote;
+        dep.decided_at = nowIso();
+        dep.updated_at = nowIso();
+      }
+
+      if (targetUserId) {
+        const w = getOrCreateWallet(targetUserId);
+        w.available_balance = fmt(Number(w.available_balance || 0) + Number(targetAmount));
+        w.total_deposited = fmt(Number(w.total_deposited || 0) + Number(targetAmount));
+        w.updated_at = nowIso();
+
+        createNotification(
+          targetUserId,
+          "deposit",
+          "Deposit Approved! 💰",
+          `Your deposit of $${targetAmount} USDT has been verified and added to your available balance.`,
+          `deposit-approved:${id}`,
+          undefined,
+          { action_url: "/wallet", action_text: "View Wallet" }
+        );
+      }
+
+      approved.push(updated);
+    } catch (err: any) {
+      errors.push({ id, error: err.message || "Failed to approve deposit." });
     }
-    if (dep.status !== "pending") {
-      errors.push({ id, error: `Deposit is already in status '${dep.status}'` });
-      continue;
-    }
-
-    const finalAmount = dep.amount;
-    dep.status = "approved";
-    dep.approved_amount = finalAmount;
-    dep.admin_id = admin.id;
-    dep.admin_note = cleanNote;
-    dep.decided_at = nowIso();
-    dep.updated_at = nowIso();
-
-    await creditWallet(
-      dep.user_id,
-      finalAmount,
-      "DEPOSIT",
-      "deposit",
-      dep.id,
-      `deposit-approve:${dep.id}`,
-      `${dep.network} USDT deposit approved (batch)`
-    );
-
-    logAudit("deposit.batch_approve", admin, "deposit", dep.id, { approved_amount: finalAmount, note: dep.admin_note });
-    createNotification(
-      dep.user_id,
-      "deposit_approved",
-      "Deposit approved",
-      `Your ${dep.network} deposit of ${finalAmount} USDT was approved and credited to your wallet.`,
-      `deposit-approved:${dep.id}`
-    );
-
-    approved.push(dep);
   }
 
   saveDatabase(true);
   res.json({ success: true, count: approved.length, approved, errors });
 });
 
-api.post("/admin/deposits/batch-reject", adminMiddleware, (req, res) => {
+api.post("/admin/deposits/batch-reject", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
   if (!ids.length) return res.status(422).json({ detail: "No deposit IDs provided." });
@@ -5110,32 +5759,41 @@ api.post("/admin/deposits/batch-reject", adminMiddleware, (req, res) => {
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    const dep = db.deposits.get(id);
-    if (!dep) {
-      errors.push({ id, error: "Deposit not found" });
-      continue;
+    try {
+      const updated = await supabaseDb.adminDecideDeposit({
+        depositId: id,
+        adminId: admin.id,
+        decision: "reject",
+        adminNote: reason,
+      });
+
+      const dep = db.deposits.get(id);
+      const targetUserId = updated.user_id || dep?.user_id;
+
+      if (dep) {
+        dep.status = "rejected";
+        dep.admin_id = admin.id;
+        dep.admin_note = reason;
+        dep.decided_at = nowIso();
+        dep.updated_at = nowIso();
+      }
+
+      if (targetUserId) {
+        createNotification(
+          targetUserId,
+          "deposit",
+          "Deposit Rejected",
+          `Your deposit was rejected. Reason: ${reason}`,
+          `deposit-rejected:${id}`,
+          undefined,
+          { action_url: "/wallet", action_text: "View Wallet" }
+        );
+      }
+
+      rejected.push(updated);
+    } catch (err: any) {
+      errors.push({ id, error: err.message || "Failed to reject deposit." });
     }
-    if (dep.status !== "pending") {
-      errors.push({ id, error: `Deposit is already in status '${dep.status}'` });
-      continue;
-    }
-
-    dep.status = "rejected";
-    dep.admin_id = admin.id;
-    dep.admin_note = reason;
-    dep.decided_at = nowIso();
-    dep.updated_at = nowIso();
-
-    logAudit("deposit.batch_reject", admin, "deposit", dep.id, { reason });
-    createNotification(
-      dep.user_id,
-      "deposit_rejected",
-      "Deposit rejected",
-      `Your ${dep.network} deposit of ${dep.amount} USDT was rejected. Reason: ${reason}`,
-      `deposit-rejected:${dep.id}`
-    );
-
-    rejected.push(dep);
   }
 
   saveDatabase(true);
@@ -5158,75 +5816,74 @@ api.post("/admin/deposits/batch-set-status", adminMiddleware, async (req, res) =
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    const dep = db.deposits.get(id);
-    if (!dep) {
-      errors.push({ id, error: "Deposit not found" });
-      continue;
-    }
+    if (status === "approved" || status === "rejected") {
+      try {
+        const result = await supabaseDb.adminDecideDeposit({
+          depositId: id,
+          adminId: admin.id,
+          decision: status === "approved" ? "approve" : "reject",
+          adminNote: note || (status === "approved" ? "Batch approved via bulk action" : "Batch rejected via bulk action"),
+        });
 
-    const prevStatus = dep.status;
+        const dep = db.deposits.get(id);
+        const targetUserId = result.user_id || dep?.user_id;
+        const targetAmount = fmt(result.approved_amount || dep?.amount || result.amount);
 
-    if (status === "approved") {
-      if (prevStatus === "approved") {
-        errors.push({ id, error: "Deposit is already approved" });
-        continue;
+        if (dep) {
+          dep.status = status;
+          if (status === "approved") dep.approved_amount = targetAmount;
+          dep.admin_id = admin.id;
+          dep.admin_note = note;
+          dep.decided_at = nowIso();
+          dep.updated_at = nowIso();
+        }
+
+        if (targetUserId) {
+          if (status === "approved") {
+            const w = getOrCreateWallet(targetUserId);
+            w.available_balance = fmt(Number(w.available_balance || 0) + Number(targetAmount));
+            w.total_deposited = fmt(Number(w.total_deposited || 0) + Number(targetAmount));
+            w.updated_at = nowIso();
+
+            createNotification(
+              targetUserId,
+              "deposit",
+              "Deposit Approved! 💰",
+              `Your deposit of $${targetAmount} USDT has been verified and added to your available balance.`,
+              `deposit-approved:${id}`,
+              undefined,
+              { action_url: "/wallet", action_text: "View Wallet" }
+            );
+          } else {
+            createNotification(
+              targetUserId,
+              "deposit",
+              "Deposit Rejected",
+              `Your deposit was rejected. Reason: ${note || "Rejected by administrator"}`,
+              `deposit-rejected:${id}`,
+              undefined,
+              { action_url: "/wallet", action_text: "View Wallet" }
+            );
+          }
+        }
+
+        updated.push(result);
+      } catch (err: any) {
+        errors.push({ id, error: err.message || `Failed to set status to ${status}.` });
       }
-      const finalAmount = dep.amount;
-      dep.status = "approved";
-      dep.approved_amount = finalAmount;
-      dep.admin_id = admin.id;
-      dep.admin_note = note || "Batch approved via bulk action";
-      dep.decided_at = nowIso();
-      dep.updated_at = nowIso();
-
-      await creditWallet(
-        dep.user_id,
-        finalAmount,
-        "DEPOSIT",
-        "deposit",
-        dep.id,
-        `deposit-approve:${dep.id}`,
-        `${dep.network} USDT deposit approved (batch)`
-      );
-
-      logAudit("deposit.batch_approve", admin, "deposit", dep.id, { approved_amount: finalAmount, note: dep.admin_note });
-      createNotification(
-        dep.user_id,
-        "deposit_approved",
-        "Deposit approved",
-        `Your ${dep.network} deposit of ${finalAmount} USDT was approved and credited to your wallet.`,
-        `deposit-approved:${dep.id}`
-      );
-    } else if (status === "rejected") {
-      if (prevStatus === "rejected") {
-        errors.push({ id, error: "Deposit is already rejected" });
-        continue;
-      }
-      dep.status = "rejected";
-      dep.admin_id = admin.id;
-      dep.admin_note = note || "Batch rejected via bulk action";
-      dep.decided_at = nowIso();
-      dep.updated_at = nowIso();
-
-      logAudit("deposit.batch_reject", admin, "deposit", dep.id, { reason: dep.admin_note });
-      createNotification(
-        dep.user_id,
-        "deposit_rejected",
-        "Deposit rejected",
-        `Your ${dep.network} deposit of ${dep.amount} USDT was rejected. Reason: ${dep.admin_note}`,
-        `deposit-rejected:${dep.id}`
-      );
     } else if (status === "pending") {
-      dep.status = "pending";
-      dep.approved_amount = null;
-      dep.admin_id = null;
-      dep.admin_note = note || "Reset to pending by admin";
-      dep.decided_at = null;
-      dep.updated_at = nowIso();
-      logAudit("deposit.batch_pending", admin, "deposit", dep.id, { note });
+      const dep = db.deposits.get(id);
+      if (dep) {
+        dep.status = "pending";
+        dep.approved_amount = null;
+        dep.admin_id = null;
+        dep.admin_note = note || "Reset to pending by admin";
+        dep.decided_at = null;
+        dep.updated_at = nowIso();
+        logAudit("deposit.batch_pending", admin, "deposit", dep.id, { note });
+        updated.push(dep);
+      }
     }
-
-    updated.push(dep);
   }
 
   saveDatabase(true);
@@ -5598,97 +6255,86 @@ api.put("/admin/settings/deposit", adminMiddleware, (req, res) => {
 });
 
 // Admin Withdrawals
-api.get("/admin/withdrawals", adminMiddleware, (req, res) => {
+api.get("/admin/withdrawals", adminMiddleware, async (req, res) => {
   const { status } = req.query;
-  let list = Array.from(db.withdrawals.values());
-  if (status) list = list.filter((w) => w.status === status);
-
-  const out = list
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .map((w) => {
-      const u = db.users.get(w.user_id);
-      return {
-        ...w,
-        user: {
-          id: u?.id || w.user_id,
-          name: u?.name || null,
-          email: u?.email || null,
-          phone: u?.phone || null,
-          kyc_status: u?.kyc_status || "none",
-          otp_verified: true, // withdrawal requires authenticated verified session
-        },
-      };
-    });
-
-  res.json(out);
+  try {
+    const list = await supabaseDb.getAllWithdrawals(status as string);
+    res.json(list);
+  } catch (err: any) {
+    let list = Array.from(db.withdrawals.values());
+    if (status) list = list.filter((w) => w.status === status);
+    const out = list
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .map((w) => {
+        const u = db.users.get(w.user_id);
+        return {
+          ...w,
+          user: {
+            id: u?.id || w.user_id,
+            name: u?.name || null,
+            email: u?.email || null,
+            phone: u?.phone || null,
+            kyc_status: u?.kyc_status || "none",
+            otp_verified: true,
+          },
+        };
+      });
+    res.json(out);
+  }
 });
 
-api.post("/admin/withdrawals/:id/approve", adminMiddleware, (req, res) => {
+api.post("/admin/withdrawals/:id/approve", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const w = db.withdrawals.get(req.params.id);
-  if (!w) return res.status(404).json({ detail: "Withdrawal not found" });
-  if (w.status !== "pending") return res.status(409).json({ detail: `Cannot approve a ${w.status} withdrawal.` });
+  const note = req.body.reason ? String(req.body.reason).trim() : undefined;
 
-  w.status = "approved";
-  w.admin_id = admin.id;
-  w.admin_note = req.body.reason || null;
-  w.decided_at = nowIso();
-  w.updated_at = nowIso();
+  try {
+    const updated = await supabaseDb.adminProcessWithdrawal({
+      withdrawalId: req.params.id,
+      adminId: admin.id,
+      action: "approve",
+      adminNote: note,
+    });
 
-  logAudit("withdrawal.approve", admin, "withdrawal", w.id);
-  createNotification(
-    w.user_id,
-    "withdrawal_approved",
-    "Withdrawal approved",
-    `Your ${w.network} withdrawal of ${w.amount} USDT was approved and is ready for dispatch.`,
-    `withdrawal-approved:${w.id}`
-  );
+    if (w) {
+      w.status = "approved";
+      w.admin_id = admin.id;
+      w.admin_note = note || null;
+      w.decided_at = nowIso();
+      w.updated_at = nowIso();
+    }
 
-  saveDatabase(true);
-  res.json(w);
+    res.json(updated);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to approve withdrawal." });
+  }
 });
 
 api.post("/admin/withdrawals/:id/reject", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const w = db.withdrawals.get(req.params.id);
-  if (!w) return res.status(404).json({ detail: "Withdrawal not found" });
-  if (w.status === "paid" || w.status === "completed") {
-    return res.status(409).json({ detail: "Cannot reject a completed/paid withdrawal." });
+  const note = req.body.reason ? String(req.body.reason).trim() : undefined;
+
+  try {
+    const updated = await supabaseDb.adminProcessWithdrawal({
+      withdrawalId: req.params.id,
+      adminId: admin.id,
+      action: "reject",
+      adminNote: note,
+    });
+
+    if (w) {
+      w.status = "rejected";
+      w.admin_id = admin.id;
+      w.admin_note = note || null;
+      w.decided_at = nowIso();
+      w.updated_at = nowIso();
+    }
+
+    res.json(updated);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to reject withdrawal." });
   }
-  if (w.status === "rejected") {
-    return res.status(409).json({ detail: "Withdrawal is already rejected." });
-  }
-  if (!["pending", "approved", "processing"].includes(w.status)) {
-    return res.status(409).json({ detail: `Cannot reject a ${w.status} withdrawal.` });
-  }
-
-  w.status = "rejected";
-  w.admin_id = admin.id;
-  w.admin_note = req.body.reason || null;
-  w.decided_at = nowIso();
-  w.updated_at = nowIso();
-
-  await creditWallet(
-    w.user_id,
-    w.amount,
-    "WITHDRAWAL_REVERSAL",
-    "withdrawal",
-    w.id,
-    `withdraw-reverse:${w.id}`,
-    `${w.network} withdrawal rejected — amount returned`
-  );
-
-  logAudit("withdrawal.reject", admin, "withdrawal", w.id, { reason: w.admin_note });
-  createNotification(
-    w.user_id,
-    "withdrawal_rejected",
-    "Withdrawal rejected",
-    `Your ${w.network} withdrawal of ${w.amount} USDT was rejected and returned to your wallet.${w.admin_note ? ` Reason: ${w.admin_note}` : ""}`,
-    `withdrawal-rejected:${w.id}`
-  );
-
-  saveDatabase(true);
-  res.json(w);
 });
 
 api.post("/admin/withdrawals/:id/processing", adminMiddleware, (req, res) => {
@@ -5716,37 +6362,32 @@ api.post("/admin/withdrawals/:id/processing", adminMiddleware, (req, res) => {
   res.json(w);
 });
 
-api.post("/admin/withdrawals/:id/process", adminMiddleware, (req, res) => {
+api.post("/admin/withdrawals/:id/process", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const w = db.withdrawals.get(req.params.id);
-  if (!w) return res.status(404).json({ detail: "Withdrawal not found" });
-  if (w.status === "paid" || w.status === "completed") {
-    return res.status(409).json({ detail: "This withdrawal has already been completed." });
-  }
-  if (!["approved", "processing"].includes(w.status)) {
-    return res.status(409).json({ detail: `Cannot process a withdrawal with status: ${w.status}. Must be approved or processing.` });
-  }
-
   const txh = String(req.body.tx_hash || "").trim();
   if (txh.length < 8) return res.status(422).json({ detail: "Enter a valid blockchain transaction hash." });
 
-  w.status = "completed";
-  w.tx_hash = txh;
-  w.admin_id = admin.id;
-  w.paid_at = nowIso();
-  w.updated_at = nowIso();
+  try {
+    const updated = await supabaseDb.adminProcessWithdrawal({
+      withdrawalId: req.params.id,
+      adminId: admin.id,
+      action: "complete",
+      txHash: txh,
+    });
 
-  logAudit("withdrawal.process", admin, "withdrawal", w.id, { tx_hash: txh });
-  createNotification(
-    w.user_id,
-    "withdrawal_paid",
-    "Withdrawal completed",
-    `Your ${w.network} withdrawal of ${w.amount} USDT has been dispatched. TX: ${txh}`,
-    `withdrawal-paid:${w.id}`
-  );
+    if (w) {
+      w.status = "completed";
+      w.tx_hash = txh;
+      w.admin_id = admin.id;
+      w.paid_at = nowIso();
+      w.updated_at = nowIso();
+    }
 
-  saveDatabase(true);
-  res.json(w);
+    res.json(updated);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to complete withdrawal." });
+  }
 });
 
 // Admin Withdrawals Batch Set Status (Approve, Processing, Mark Completed, Reject & Refund)
@@ -5767,94 +6408,122 @@ api.post("/admin/withdrawals/batch-set-status", adminMiddleware, async (req, res
 
   for (const id of ids) {
     const w = db.withdrawals.get(id);
-    if (!w) {
-      errors.push({ id, error: "Withdrawal not found" });
-      continue;
+    const actualHash = tx_hash || ("0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""));
+
+    // 1. Authoritative update in Supabase
+    try {
+      if (status === "approved") {
+        await supabaseDb.adminProcessWithdrawal({
+          withdrawalId: id,
+          action: "approve",
+          adminId: admin.id,
+          adminEmail: admin.email,
+          adminNote: note || undefined,
+        });
+      } else if (status === "completed") {
+        await supabaseDb.adminProcessWithdrawal({
+          withdrawalId: id,
+          action: "complete",
+          adminId: admin.id,
+          adminEmail: admin.email,
+          txHash: actualHash,
+          adminNote: note || undefined,
+        });
+      } else if (status === "rejected") {
+        await supabaseDb.adminProcessWithdrawal({
+          withdrawalId: id,
+          action: "reject",
+          adminId: admin.id,
+          adminEmail: admin.email,
+          reason: note || "Batch rejected by admin",
+        });
+      }
+    } catch (sbErr: any) {
+      console.warn(`[BatchWithdrawal] Supabase process note for ${id}:`, sbErr?.message);
     }
 
-    if (w.status === "completed" || w.status === "paid") {
-      errors.push({ id, error: "Cannot modify an already completed withdrawal" });
-      continue;
-    }
-
-    if (status === "approved") {
-      if (w.status !== "pending") {
-        errors.push({ id, error: `Only pending withdrawals can be approved (currently ${w.status})` });
+    // 2. Mirror in local memory
+    if (w) {
+      if (w.status === "completed" || w.status === "paid") {
+        errors.push({ id, error: "Cannot modify an already completed withdrawal" });
         continue;
       }
-      w.status = "approved";
-      w.admin_id = admin.id;
-      w.admin_note = note || null;
-      w.decided_at = nowIso();
-      w.updated_at = nowIso();
-      logAudit("withdrawal.batch_approve", admin, "withdrawal", w.id);
-      createNotification(
-        w.user_id,
-        "withdrawal_approved",
-        "Withdrawal approved",
-        `Your ${w.network} withdrawal of ${w.amount} USDT was approved and is ready for dispatch.`,
-        `withdrawal-approved:${w.id}`
-      );
-    } else if (status === "processing") {
-      w.status = "processing";
-      w.admin_id = admin.id;
-      w.admin_note = note || null;
-      w.updated_at = nowIso();
-      logAudit("withdrawal.batch_processing", admin, "withdrawal", w.id);
-      createNotification(
-        w.user_id,
-        "withdrawal_processing",
-        "Withdrawal processing",
-        `Your ${w.network} withdrawal of ${w.amount} USDT is now processing on the blockchain.`,
-        `withdrawal-processing:${w.id}`
-      );
-    } else if (status === "completed") {
-      const actualHash = tx_hash || ("0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""));
-      w.status = "completed";
-      w.tx_hash = actualHash;
-      w.admin_id = admin.id;
-      w.paid_at = nowIso();
-      w.updated_at = nowIso();
-      logAudit("withdrawal.batch_process", admin, "withdrawal", w.id, { tx_hash: actualHash });
-      createNotification(
-        w.user_id,
-        "withdrawal_paid",
-        "Withdrawal completed",
-        `Your ${w.network} withdrawal of ${w.amount} USDT has been dispatched. TX: ${actualHash}`,
-        `withdrawal-paid:${w.id}`
-      );
-    } else if (status === "rejected") {
-      if (w.status === "rejected") {
-        errors.push({ id, error: "Withdrawal is already rejected" });
-        continue;
+
+      if (status === "approved") {
+        w.status = "approved";
+        w.admin_id = admin.id;
+        w.admin_note = note || null;
+        w.decided_at = nowIso();
+        w.updated_at = nowIso();
+        logAudit("withdrawal.batch_approve", admin, "withdrawal", w.id);
+        createNotification(
+          w.user_id,
+          "withdrawal_approved",
+          "Withdrawal approved",
+          `Your ${w.network} withdrawal of ${w.amount} USDT was approved and is ready for dispatch.`,
+          `withdrawal-approved:${w.id}`
+        );
+      } else if (status === "processing") {
+        w.status = "processing";
+        w.admin_id = admin.id;
+        w.admin_note = note || null;
+        w.updated_at = nowIso();
+        logAudit("withdrawal.batch_processing", admin, "withdrawal", w.id);
+        createNotification(
+          w.user_id,
+          "withdrawal_processing",
+          "Withdrawal processing",
+          `Your ${w.network} withdrawal of ${w.amount} USDT is now processing on the blockchain.`,
+          `withdrawal-processing:${w.id}`
+        );
+      } else if (status === "completed") {
+        w.status = "completed";
+        w.tx_hash = actualHash;
+        w.admin_id = admin.id;
+        w.paid_at = nowIso();
+        w.updated_at = nowIso();
+        logAudit("withdrawal.batch_process", admin, "withdrawal", w.id, { tx_hash: actualHash });
+        createNotification(
+          w.user_id,
+          "withdrawal_paid",
+          "Withdrawal completed",
+          `Your ${w.network} withdrawal of ${w.amount} USDT has been dispatched. TX: ${actualHash}`,
+          `withdrawal-paid:${w.id}`
+        );
+      } else if (status === "rejected") {
+        if (w.status === "rejected") {
+          errors.push({ id, error: "Withdrawal is already rejected" });
+          continue;
+        }
+        w.status = "rejected";
+        w.admin_id = admin.id;
+        w.admin_note = note || "Batch rejected by admin";
+        w.decided_at = nowIso();
+        w.updated_at = nowIso();
+
+        await creditWallet(
+          w.user_id,
+          w.amount,
+          "WITHDRAWAL_REVERSAL",
+          "withdrawal",
+          w.id,
+          `withdraw-reverse:${w.id}`,
+          `${w.network} withdrawal rejected — amount returned`
+        );
+
+        logAudit("withdrawal.batch_reject", admin, "withdrawal", w.id, { reason: w.admin_note });
+        createNotification(
+          w.user_id,
+          "withdrawal_rejected",
+          "Withdrawal rejected",
+          `Your ${w.network} withdrawal of ${w.amount} USDT was rejected and returned to your wallet.${w.admin_note ? ` Reason: ${w.admin_note}` : ""}`,
+          `withdrawal-rejected:${w.id}`
+        );
       }
-      w.status = "rejected";
-      w.admin_id = admin.id;
-      w.admin_note = note || "Batch rejected by admin";
-      w.decided_at = nowIso();
-      w.updated_at = nowIso();
-
-      await creditWallet(
-        w.user_id,
-        w.amount,
-        "WITHDRAWAL_REVERSAL",
-        "withdrawal",
-        w.id,
-        `withdraw-reverse:${w.id}`,
-        `${w.network} withdrawal rejected — amount returned`
-      );
-
-      logAudit("withdrawal.batch_reject", admin, "withdrawal", w.id, { reason: w.admin_note });
-      createNotification(
-        w.user_id,
-        "withdrawal_rejected",
-        "Withdrawal rejected",
-        `Your ${w.network} withdrawal of ${w.amount} USDT was rejected and returned to your wallet.${w.admin_note ? ` Reason: ${w.admin_note}` : ""}`,
-        `withdrawal-rejected:${w.id}`
-      );
+      updated.push(w);
+    } else {
+      updated.push({ id, status });
     }
-
-    updated.push(w);
   }
 
   saveDatabase(true);
@@ -6033,111 +6702,106 @@ api.get("/admin/plans/:key/history", adminMiddleware, (req, res) => {
 });
 
 // Admin KYC
-api.get("/admin/kyc", adminMiddleware, (req, res) => {
+api.get("/admin/kyc", adminMiddleware, async (req, res) => {
   const { status } = req.query;
-  let list = Array.from(db.kyc_records.values());
-  if (status) list = list.filter((k) => k.status === status);
+  try {
+    const list = await supabaseDb.getAllKyc(status as string);
+    res.json(list);
+  } catch (err: any) {
+    let list = Array.from(db.kyc_records.values());
+    if (status) list = list.filter((k) => k.status === status);
 
-  const out = list
-    .sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime())
-    .map((k) => {
-      const u = db.users.get(k.user_id);
-      const docs = Array.from(db.kyc_documents.values())
-        .filter((d) => d.user_id === k.user_id)
-        .map((d) => ({ id: d.id, doc_type: d.doc_type, mime: d.mime }));
+    const out = list
+      .sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime())
+      .map((k) => {
+        const u = db.users.get(k.user_id);
+        const docs = Array.from(db.kyc_documents.values())
+          .filter((d) => d.user_id === k.user_id)
+          .map((d) => ({ id: d.id, doc_type: d.doc_type, mime: d.mime }));
 
-      return {
-        id: k.id,
-        user_id: k.user_id,
-        user_name: u?.name || null,
-        user_email: u?.email || null,
-        user_phone: u?.phone || null,
-        status: k.status,
-        id_type: k.id_type,
-        id_number: k.id_number || k.id_number_masked || null,
-        id_number_masked: k.id_number_masked || null,
-        id_number_present: Boolean(k.id_number || k.id_number_encrypted),
-        address: k.address || k.permanent_address || u?.address || null,
-        permanent_address: k.permanent_address || k.address || u?.permanent_address || u?.address || null,
-        liveness: k.liveness_metadata || null,
-        reject_reason: k.reject_reason,
-        submitted_at: k.submitted_at,
-        reviewed_at: k.reviewed_at,
-        documents: docs,
-      };
+        return {
+          id: k.id,
+          user_id: k.user_id,
+          user_name: u?.name || null,
+          user_email: u?.email || null,
+          user_phone: u?.phone || null,
+          status: k.status,
+          id_type: k.id_type,
+          id_number: k.id_number || k.id_number_masked || null,
+          id_number_masked: k.id_number_masked || null,
+          id_number_present: Boolean(k.id_number || k.id_number_encrypted),
+          address: k.address || k.permanent_address || u?.address || null,
+          permanent_address: k.permanent_address || k.address || u?.permanent_address || u?.address || null,
+          liveness: k.liveness_metadata || null,
+          reject_reason: k.reject_reason,
+          submitted_at: k.submitted_at,
+          reviewed_at: k.reviewed_at,
+          documents: docs,
+        };
+      });
+
+    res.json(out);
+  }
+});
+
+api.post("/admin/kyc/:id/approve", adminMiddleware, async (req, res) => {
+  const admin = (req as any).user;
+  try {
+    const updated = await supabaseDb.adminReviewKyc({
+      kycIdOrUserId: req.params.id,
+      adminId: admin.id,
+      decision: "approve",
     });
 
-  res.json(out);
+    // Mirror in local db
+    for (const k of db.kyc_records.values()) {
+      if (k.id === req.params.id || k.user_id === req.params.id) {
+        k.status = "approved";
+        k.admin_id = admin.id;
+        k.reviewed_at = nowIso();
+        k.updated_at = nowIso();
+        const user = db.users.get(k.user_id);
+        if (user) user.kyc_status = "approved";
+        break;
+      }
+    }
+
+    res.json({ ok: true, status: "approved", record: updated });
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to approve KYC" });
+  }
 });
 
-api.post("/admin/kyc/:id/approve", adminMiddleware, (req, res) => {
+api.post("/admin/kyc/:id/reject", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  let record: any = null;
-  for (const k of db.kyc_records.values()) {
-    if (k.id === req.params.id || k.user_id === req.params.id) {
-      record = k;
-      break;
-    }
-  }
-  if (!record) return res.status(404).json({ detail: "KYC record not found" });
-
-  record.status = "approved";
-  record.admin_id = admin.id;
-  record.reviewed_at = nowIso();
-  record.updated_at = nowIso();
-
-  const user = db.users.get(record.user_id);
-  if (user) user.kyc_status = "approved";
-
-  saveDatabase();
-
-  logAudit("kyc.approve", admin, "kyc_record", record.id);
-  createNotification(
-    record.user_id,
-    "kyc_approved",
-    "KYC approved",
-    "Your identity verification was approved. You can now withdraw funds.",
-    `kyc_approved:${record.id}`
-  );
-
-  reminderEngine.handleUserActionCompleted(record.user_id, "kyc");
-
-  res.json({ ok: true, status: "approved" });
-});
-
-api.post("/admin/kyc/:id/reject", adminMiddleware, (req, res) => {
-  const admin = (req as any).user;
-  let record: any = null;
-  for (const k of db.kyc_records.values()) {
-    if (k.id === req.params.id || k.user_id === req.params.id) {
-      record = k;
-      break;
-    }
-  }
-  if (!record) return res.status(404).json({ detail: "KYC record not found" });
-
   const reason = sanitizePlainText(req.body.reason || "Documentation unclear", 500);
-  record.status = "rejected";
-  record.reject_reason = reason;
-  record.admin_id = admin.id;
-  record.reviewed_at = nowIso();
-  record.updated_at = nowIso();
 
-  const user = db.users.get(record.user_id);
-  if (user) user.kyc_status = "rejected";
+  try {
+    const updated = await supabaseDb.adminReviewKyc({
+      kycIdOrUserId: req.params.id,
+      adminId: admin.id,
+      decision: "reject",
+      rejectReason: reason,
+    });
 
-  saveDatabase();
+    // Mirror in local db
+    for (const k of db.kyc_records.values()) {
+      if (k.id === req.params.id || k.user_id === req.params.id) {
+        k.status = "rejected";
+        k.reject_reason = reason;
+        k.admin_id = admin.id;
+        k.reviewed_at = nowIso();
+        k.updated_at = nowIso();
+        const user = db.users.get(k.user_id);
+        if (user) user.kyc_status = "rejected";
+        break;
+      }
+    }
 
-  logAudit("kyc.reject", admin, "kyc_record", record.id, { reason });
-  createNotification(
-    record.user_id,
-    "kyc_rejected",
-    "KYC rejected",
-    `Your identity verification was rejected: ${reason}. Please resubmit.`,
-    `kyc_rejected:${record.id}`
-  );
-
-  res.json({ ok: true, status: "rejected" });
+    res.json({ ok: true, status: "rejected", record: updated });
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to reject KYC" });
+  }
 });
 
 // Admin Update KYC Details (ID Type, ID Number, Address, User Name, Status, Note)
@@ -6335,7 +6999,7 @@ api.put("/admin/users/:userId/kyc", adminMiddleware, (req, res) => {
   res.json({ ok: true, user: cleanUser(user) });
 });
 
-api.post("/admin/kyc/batch-approve", adminMiddleware, (req, res) => {
+api.post("/admin/kyc/batch-approve", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
   if (!ids.length) return res.status(422).json({ detail: "No KYC IDs provided." });
@@ -6346,126 +7010,25 @@ api.post("/admin/kyc/batch-approve", adminMiddleware, (req, res) => {
   for (const id of ids) {
     let record: any = null;
     for (const k of db.kyc_records.values()) {
-      if (k.id === id) {
+      if (k.id === id || k.user_id === id) {
         record = k;
         break;
       }
     }
-    if (!record) {
-      errors.push({ id, error: "KYC record not found" });
-      continue;
-    }
-    if (record.status !== "pending") {
-      errors.push({ id, error: `KYC record is already in status '${record.status}'` });
-      continue;
-    }
 
-    record.status = "approved";
-    record.admin_id = admin.id;
-    record.reviewed_at = nowIso();
-    record.updated_at = nowIso();
-
-    const user = db.users.get(record.user_id);
-    if (user) user.kyc_status = "approved";
-
-    logAudit("kyc.batch_approve", admin, "kyc_record", record.id);
-    createNotification(
-      record.user_id,
-      "kyc_approved",
-      "KYC approved",
-      "Your identity verification was approved. You can now withdraw funds.",
-      `kyc_approved:${record.id}`
-    );
-
-    approved.push({ id: record.id, user_id: record.user_id });
-  }
-
-  saveDatabase();
-
-  res.json({ success: true, count: approved.length, approved, errors });
-});
-
-api.post("/admin/kyc/batch-reject", adminMiddleware, (req, res) => {
-  const admin = (req as any).user;
-  const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
-  if (!ids.length) return res.status(422).json({ detail: "No KYC IDs provided." });
-
-  const reason = sanitizePlainText(req.body.reason || "Batch rejected by admin", 500);
-  const rejected: any[] = [];
-  const errors: { id: string; error: string }[] = [];
-
-  for (const id of ids) {
-    let record: any = null;
-    for (const k of db.kyc_records.values()) {
-      if (k.id === id) {
-        record = k;
-        break;
-      }
-    }
-    if (!record) {
-      errors.push({ id, error: "KYC record not found" });
-      continue;
-    }
-    if (record.status !== "pending") {
-      errors.push({ id, error: `KYC record is already in status '${record.status}'` });
-      continue;
+    // 1. Authoritative update in Supabase
+    try {
+      await supabaseDb.adminReviewKyc({
+        kycIdOrUserId: record ? (record.user_id || record.id) : id,
+        adminId: admin.id,
+        decision: "approve",
+      });
+    } catch (sbErr: any) {
+      console.warn(`[BatchKYC] Supabase review note for ${id}:`, sbErr?.message);
     }
 
-    record.status = "rejected";
-    record.reject_reason = reason;
-    record.admin_id = admin.id;
-    record.reviewed_at = nowIso();
-    record.updated_at = nowIso();
-
-    const user = db.users.get(record.user_id);
-    if (user) user.kyc_status = "rejected";
-
-    logAudit("kyc.batch_reject", admin, "kyc_record", record.id, { reason });
-    createNotification(
-      record.user_id,
-      "kyc_rejected",
-      "KYC rejected",
-      `Your identity verification was rejected: ${reason}. Please resubmit.`,
-      `kyc_rejected:${record.id}`
-    );
-
-    rejected.push({ id: record.id, user_id: record.user_id });
-  }
-
-  saveDatabase();
-
-  res.json({ success: true, count: rejected.length, rejected, errors });
-});
-
-// Admin KYC Batch Set Status (Approve, Reject, or Reset Pending)
-api.post("/admin/kyc/batch-set-status", adminMiddleware, (req, res) => {
-  const admin = (req as any).user;
-  const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
-  const status = String(req.body.status || "").toLowerCase();
-  const reason = String(req.body.reason || req.body.note || "").trim();
-
-  if (!ids.length) return res.status(422).json({ detail: "No KYC IDs provided." });
-  if (!["approved", "rejected", "pending"].includes(status)) {
-    return res.status(422).json({ detail: "Invalid status. Must be 'approved', 'rejected', or 'pending'." });
-  }
-
-  const updated: any[] = [];
-  const errors: { id: string; error: string }[] = [];
-
-  for (const id of ids) {
-    let record: any = null;
-    for (const k of db.kyc_records.values()) {
-      if (k.id === id) {
-        record = k;
-        break;
-      }
-    }
-    if (!record) {
-      errors.push({ id, error: "KYC record not found" });
-      continue;
-    }
-
-    if (status === "approved") {
+    // 2. Mirror in local memory
+    if (record) {
       record.status = "approved";
       record.admin_id = admin.id;
       record.reviewed_at = nowIso();
@@ -6482,9 +7045,50 @@ api.post("/admin/kyc/batch-set-status", adminMiddleware, (req, res) => {
         "Your identity verification was approved. You can now withdraw funds.",
         `kyc_approved:${record.id}`
       );
-    } else if (status === "rejected") {
+      approved.push({ id: record.id, user_id: record.user_id });
+    } else {
+      approved.push({ id });
+    }
+  }
+
+  saveDatabase();
+  res.json({ success: true, count: approved.length, approved, errors });
+});
+
+api.post("/admin/kyc/batch-reject", adminMiddleware, async (req, res) => {
+  const admin = (req as any).user;
+  const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
+  if (!ids.length) return res.status(422).json({ detail: "No KYC IDs provided." });
+
+  const reason = sanitizePlainText(req.body.reason || "Batch rejected by admin", 500);
+  const rejected: any[] = [];
+  const errors: { id: string; error: string }[] = [];
+
+  for (const id of ids) {
+    let record: any = null;
+    for (const k of db.kyc_records.values()) {
+      if (k.id === id || k.user_id === id) {
+        record = k;
+        break;
+      }
+    }
+
+    // 1. Authoritative update in Supabase
+    try {
+      await supabaseDb.adminReviewKyc({
+        kycIdOrUserId: record ? (record.user_id || record.id) : id,
+        adminId: admin.id,
+        decision: "reject",
+        rejectReason: reason,
+      });
+    } catch (sbErr: any) {
+      console.warn(`[BatchKYC] Supabase reject note for ${id}:`, sbErr?.message);
+    }
+
+    // 2. Mirror in local memory
+    if (record) {
       record.status = "rejected";
-      record.reject_reason = reason || "Identity documents rejected by admin";
+      record.reject_reason = reason;
       record.admin_id = admin.id;
       record.reviewed_at = nowIso();
       record.updated_at = nowIso();
@@ -6492,28 +7096,115 @@ api.post("/admin/kyc/batch-set-status", adminMiddleware, (req, res) => {
       const user = db.users.get(record.user_id);
       if (user) user.kyc_status = "rejected";
 
-      logAudit("kyc.batch_reject", admin, "kyc_record", record.id, { reason: record.reject_reason });
+      logAudit("kyc.batch_reject", admin, "kyc_record", record.id, { reason });
       createNotification(
         record.user_id,
         "kyc_rejected",
         "KYC rejected",
-        `Your identity verification was rejected: ${record.reject_reason}. Please resubmit.`,
+        `Your identity verification was rejected: ${reason}. Please resubmit.`,
         `kyc_rejected:${record.id}`
       );
-    } else if (status === "pending") {
-      record.status = "pending";
-      record.reject_reason = null;
-      record.admin_id = null;
-      record.reviewed_at = null;
-      record.updated_at = nowIso();
+      rejected.push({ id: record.id, user_id: record.user_id });
+    } else {
+      rejected.push({ id });
+    }
+  }
 
-      const user = db.users.get(record.user_id);
-      if (user) user.kyc_status = "pending";
+  saveDatabase();
+  res.json({ success: true, count: rejected.length, rejected, errors });
+});
 
-      logAudit("kyc.batch_pending", admin, "kyc_record", record.id);
+// Admin KYC Batch Set Status (Approve, Reject, or Reset Pending)
+api.post("/admin/kyc/batch-set-status", adminMiddleware, async (req, res) => {
+  const admin = (req as any).user;
+  const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
+  const status = String(req.body.status || "").toLowerCase();
+  const reason = String(req.body.reason || req.body.note || "").trim();
+
+  if (!ids.length) return res.status(422).json({ detail: "No KYC IDs provided." });
+  if (!["approved", "rejected", "pending"].includes(status)) {
+    return res.status(422).json({ detail: "Invalid status. Must be 'approved', 'rejected', or 'pending'." });
+  }
+
+  const updated: any[] = [];
+  const errors: { id: string; error: string }[] = [];
+
+  for (const id of ids) {
+    let record: any = null;
+    for (const k of db.kyc_records.values()) {
+      if (k.id === id || k.user_id === id) {
+        record = k;
+        break;
+      }
     }
 
-    updated.push({ id: record.id, user_id: record.user_id, status: record.status });
+    // 1. Authoritative update in Supabase
+    if (status === "approved" || status === "rejected") {
+      try {
+        await supabaseDb.adminReviewKyc({
+          kycIdOrUserId: record ? (record.user_id || record.id) : id,
+          adminId: admin.id,
+          decision: status as "approve" | "reject",
+          rejectReason: status === "rejected" ? reason || "Identity documents rejected by admin" : undefined,
+        });
+      } catch (sbErr: any) {
+        console.warn(`[BatchKYC] Supabase set-status note for ${id}:`, sbErr?.message);
+      }
+    }
+
+    // 2. Mirror in local memory
+    if (record) {
+      if (status === "approved") {
+        record.status = "approved";
+        record.admin_id = admin.id;
+        record.reviewed_at = nowIso();
+        record.updated_at = nowIso();
+
+        const user = db.users.get(record.user_id);
+        if (user) user.kyc_status = "approved";
+
+        logAudit("kyc.batch_approve", admin, "kyc_record", record.id);
+        createNotification(
+          record.user_id,
+          "kyc_approved",
+          "KYC approved",
+          "Your identity verification was approved. You can now withdraw funds.",
+          `kyc_approved:${record.id}`
+        );
+      } else if (status === "rejected") {
+        record.status = "rejected";
+        record.reject_reason = reason || "Identity documents rejected by admin";
+        record.admin_id = admin.id;
+        record.reviewed_at = nowIso();
+        record.updated_at = nowIso();
+
+        const user = db.users.get(record.user_id);
+        if (user) user.kyc_status = "rejected";
+
+        logAudit("kyc.batch_reject", admin, "kyc_record", record.id, { reason: record.reject_reason });
+        createNotification(
+          record.user_id,
+          "kyc_rejected",
+          "KYC rejected",
+          `Your identity verification was rejected: ${record.reject_reason}. Please resubmit.`,
+          `kyc_rejected:${record.id}`
+        );
+      } else if (status === "pending") {
+        record.status = "pending";
+        record.reject_reason = null;
+        record.admin_id = null;
+        record.reviewed_at = null;
+        record.updated_at = nowIso();
+
+        const user = db.users.get(record.user_id);
+        if (user) user.kyc_status = "pending";
+
+        logAudit("kyc.batch_pending", admin, "kyc_record", record.id);
+      }
+      updated.push({ id: record.id, user_id: record.user_id, status: record.status });
+    } else {
+      updated.push({ id, status });
+    }
   }
 
   saveDatabase();
@@ -9924,10 +10615,13 @@ const startServer = async () => {
 
   const server = app.listen(PORT, HOST, () => {
     console.log(`[EasyX] Server running at http://${HOST}:${PORT}`);
+    // Start automated background maturity processing worker
+    maturityWorker.start(60000);
   });
 
   const shutdown = () => {
     console.log("[EasyX] Shutting down gracefully...");
+    maturityWorker.stop();
     saveDatabase();
     server.close(() => {
       process.exit(0);

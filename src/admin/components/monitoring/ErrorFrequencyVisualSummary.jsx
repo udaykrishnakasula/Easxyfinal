@@ -49,9 +49,9 @@ const STATUS_COLORS = {
 
 // Custom interactive Recharts Tooltip
 function CustomErrorTooltip({ active, payload, label, mode }) {
-  if (!active || !payload || !payload.length) return null;
+  if (!active || !payload || !Array.isArray(payload) || !payload.length || !payload[0]) return null;
 
-  const dataPoint = payload[0]?.payload;
+  const dataPoint = payload?.[0]?.payload;
   if (!dataPoint) return null;
 
   return (
@@ -363,8 +363,8 @@ export default function ErrorFrequencyVisualSummary({
                   data={days}
                   margin={{ top: 16, right: 12, left: -20, bottom: 4 }}
                   onClick={(e) => {
-                    if (e && e.activePayload && e.activePayload.length) {
-                      const clicked = e.activePayload[0].payload;
+                    const clicked = e?.activePayload?.[0]?.payload;
+                    if (clicked) {
                       handleOpenDayPanel(clicked);
                     }
                   }}

@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "postinstall": "node scripts/patch-embla.js",
+    "prebuild": "node scripts/patch-embla.js",
     "type-check": "tsc --noEmit",
     "lint": "npm run type-check",
     "build:client": "vite build",

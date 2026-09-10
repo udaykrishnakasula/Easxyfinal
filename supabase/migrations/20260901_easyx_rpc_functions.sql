@@ -21,7 +21,7 @@ DECLARE
     v_new_available NUMERIC(20, 6);
     v_new_invested NUMERIC(20, 6);
     v_referrer_id UUID;
-    v_commission_rate NUMERIC(6, 4) := 5.0000; -- 5% direct commission
+    v_commission_rate NUMERIC(6, 4) := 10.0000; -- 10% direct commission
     v_commission_amount NUMERIC(20, 6);
     v_ref_wallet RECORD;
 BEGIN

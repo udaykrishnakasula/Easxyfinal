@@ -56,7 +56,17 @@ export default function NotificationBell() {
   const markRead = useMarkNotificationRead();
   const markAllRead = useMarkAllNotificationsRead();
 
-  const recent = (notifications || []).slice(0, 8);
+  const notifList = Array.isArray(notifications)
+    ? notifications
+    : Array.isArray(notifications?.notifications)
+    ? notifications.notifications
+    : Array.isArray(notifications?.data)
+    ? notifications.data
+    : typeof notifications === "string" && notifications.trim().startsWith("[")
+    ? (() => { try { const p = JSON.parse(notifications); return Array.isArray(p) ? p : []; } catch { return []; } })()
+    : [];
+
+  const recent = notifList.slice(0, 8);
   const hasUnread = unreadCount > 0;
 
   const handleItemClick = (n) => {

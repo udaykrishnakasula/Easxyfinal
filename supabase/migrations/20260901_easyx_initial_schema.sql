@@ -613,14 +613,15 @@ USING (is_admin());
 
 INSERT INTO investment_plans (key, name, badge_text, min_amount, max_amount, lock_days, profit_percentage, maturity_percentage, daily_rate_percentage, is_active, sort_order)
 VALUES 
-    ('silver', 'Silver Starter', 'Beginner Staking', 100.000000, 999.000000, 60, 40.0000, 140.0000, 0.6667, TRUE, 1),
+    ('silver', 'Silver Starter', 'Beginner Staking', 100.000000, 999.000000, 60, 60.0000, 160.0000, 1.0000, TRUE, 1),
     ('gold', 'Gold Yield', 'Most Popular', 1000.000000, 4999.000000, 60, 60.0000, 160.0000, 1.0000, TRUE, 2),
-    ('platinum', 'Platinum Wealth', 'High Yield', 5000.000000, 9999.000000, 60, 80.0000, 180.0000, 1.3333, TRUE, 3),
+    ('platinum', 'Platinum Wealth', 'High Yield', 5000.000000, 9999.000000, 60, 100.0000, 200.0000, 1.6667, TRUE, 3),
     ('diamond', 'Diamond Reserve', 'Institutional', 10000.000000, NULL, 60, 100.0000, 200.0000, 1.6667, TRUE, 4)
 ON CONFLICT (key) DO UPDATE SET
     name = EXCLUDED.name,
     min_amount = EXCLUDED.min_amount,
     max_amount = EXCLUDED.max_amount,
+    lock_days = EXCLUDED.lock_days,
     profit_percentage = EXCLUDED.profit_percentage,
     maturity_percentage = EXCLUDED.maturity_percentage,
     daily_rate_percentage = EXCLUDED.daily_rate_percentage;

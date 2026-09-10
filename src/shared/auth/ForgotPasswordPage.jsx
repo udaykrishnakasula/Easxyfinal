@@ -32,8 +32,11 @@ const RECOVERY_SESSION_KEY = "easyx_recovery_session";
  */
 export function maskEmail(email) {
   if (!email || typeof email !== "string" || !email.includes("@")) return email || "";
-  const [local, domain] = email.split("@");
-  if (local.length <= 2) return `${local[0]}*@${domain}`;
+  const parts = email.split("@");
+  const local = parts?.[0] || "";
+  const domain = parts?.[1] || "";
+  if (!local) return email || "";
+  if (local.length <= 2) return `${local[0] || ""}*@${domain}`;
   if (local.length <= 4) return `${local.slice(0, 1)}**${local.slice(-1)}@${domain}`;
   return `${local.slice(0, 2)}***${local.slice(-1)}@${domain}`;
 }

@@ -35,6 +35,7 @@ import {
 
 import { useAdminAuditLogs, downloadAuditLogs } from "@/admin/adminApi";
 import { downloadProductionAuditReport, MASTER_AUDIT_REPORT_MD } from "@/admin/utils/downloadAuditReport";
+import { safeJsonStringify } from "@/shared/analytics/dataMasker";
 import {
   PageHeading,
   EasyXCard,
@@ -875,7 +876,7 @@ export default function AdminAuditPage() {
                 <span className="font-semibold text-white/70">Raw Event Payload (JSON)</span>
                 <button
                   onClick={() =>
-                    handleCopy(JSON.stringify(selectedLog, null, 2), "modal-json")
+                    handleCopy(safeJsonStringify(selectedLog, 2), "modal-json")
                   }
                   className="flex items-center gap-1 text-[11px] text-ex-accent hover:underline"
                 >
@@ -893,7 +894,7 @@ export default function AdminAuditPage() {
                 </button>
               </div>
               <pre className="max-h-56 overflow-auto rounded-lg border border-white/10 bg-black/50 p-3.5 font-mono text-[11px] text-emerald-300">
-                {JSON.stringify(selectedLog, null, 2)}
+                {safeJsonStringify(selectedLog, 2)}
               </pre>
             </div>
 

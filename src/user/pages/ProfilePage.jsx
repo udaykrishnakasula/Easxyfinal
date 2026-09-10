@@ -48,14 +48,15 @@ export default function ProfilePage() {
   const [changingPassword, setChangingPassword] = useState(false);
 
   const isKycApproved = user?.kyc_status === "approved";
-  const initials = user?.name
+  const initials = user?.name && typeof user.name === "string"
     ? user.name
-        .split(" ")
-        .map((p) => p[0])
+        .trim()
+        .split(/\s+/)
+        .map((p) => p?.[0] || "")
         .filter(Boolean)
         .slice(0, 2)
         .join("")
-        .toUpperCase()
+        .toUpperCase() || "U"
     : "U";
 
   // Handler: Save Profile Details

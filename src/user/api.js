@@ -107,11 +107,34 @@ export function useCreateWithdrawal() {
 }
 
 export function useNotifications(unreadOnly = false) {
+  const token = typeof window !== "undefined" ? getToken() : null;
   return useQuery({
     queryKey: ["notifications", unreadOnly ? "unread" : "all"],
-    queryFn: async () =>
-      (await api.get("/notifications", { params: unreadOnly ? { unread_only: true } : {} })).data,
-    refetchInterval: 30000,
+    queryFn: async () => {
+      try {
+        const t = getToken();
+        if (!t) return [];
+        const res = await api.get("/notifications", { params: unreadOnly ? { unread_only: true } : {} });
+        const data = res?.data;
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data?.notifications)) return data.notifications;
+        if (Array.isArray(data?.data)) return data.data;
+        if (typeof data === "string" && data.trim().startsWith("[")) {
+          try {
+            const parsed = JSON.parse(data);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    },
+    enabled: !!token,
+    refetchInterval: token ? 30000 : false,
+    initialData: [],
   });
 }
 

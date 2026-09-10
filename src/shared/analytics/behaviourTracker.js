@@ -6,7 +6,7 @@
  * - Screen view duration & Funnel drop-offs (Deposits, KYC, Investments)
  */
 
-import { maskSensitiveData, sanitizeUrl } from "./dataMasker";
+import { maskSensitiveData, sanitizeUrl, safeJsonStringify } from "./dataMasker";
 
 const EVENTS_STORAGE_KEY = "easyx_analytics_events_v1";
 const FUNNELS_STORAGE_KEY = "easyx_active_funnels_v1";
@@ -142,7 +142,7 @@ class BehaviourTracker {
           coordinates: { x, y },
           route: this.currentRoute,
           metadata: {
-            durationMs: nearbyClicks[0]?.time ? now - nearbyClicks[0].time : 0,
+            durationMs: (nearbyClicks?.[0]?.time ? now - nearbyClicks[0].time : 0),
             tag: elInfo.tag,
             testId: elInfo.testId,
           },
@@ -244,8 +244,8 @@ class BehaviourTracker {
         const tracker = this;
         const wrappedFetch = function (...args) {
           try {
-            const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-            if (!url.includes("/api/analytics/")) {
+            const url = typeof args?.[0] === "string" ? args[0] : args?.[0]?.url || "";
+            if (typeof url === "string" && !url.includes("/api/analytics/")) {
               tracker.lastNetworkCallTime = Date.now();
             }
           } catch {
@@ -561,7 +561,7 @@ class BehaviourTracker {
       const stored = this.getStoredEvents();
       stored.unshift(event);
       const trimmed = stored.slice(0, MAX_LOCAL_EVENTS);
-      localStorage.setItem(EVENTS_STORAGE_KEY, JSON.stringify(trimmed));
+      localStorage.setItem(EVENTS_STORAGE_KEY, safeJsonStringify(trimmed));
     } catch {
       // Storage restricted
     }
@@ -666,7 +666,7 @@ class BehaviourTracker {
         fetch("/api/analytics/events", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ events: batch }),
+          body: safeJsonStringify({ events: batch }),
         }).catch(() => {
           // ignore
         });
@@ -679,7 +679,7 @@ class BehaviourTracker {
   flushQueueSync() {
     if (!this.eventQueue.length || typeof navigator === "undefined" || !navigator.sendBeacon) return;
     try {
-      const batch = JSON.stringify({ events: this.eventQueue });
+      const batch = safeJsonStringify({ events: this.eventQueue });
       navigator.sendBeacon("/api/analytics/events", batch);
       this.eventQueue = [];
     } catch {

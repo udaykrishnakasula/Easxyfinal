@@ -11,7 +11,7 @@
  * - Correlation ID injection for API tracing
  */
 
-import { maskSensitiveData, sanitizeUrl } from "./dataMasker";
+import { maskSensitiveData, sanitizeUrl, safeJsonStringify } from "./dataMasker";
 
 const MONITORING_SESSION_KEY = "easyx_monitoring_session_id";
 const MONITORING_QUEUE_KEY = "easyx_monitoring_event_queue";
@@ -304,7 +304,7 @@ class MonitoringClient {
         await fetch("/api/analytics/events", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ events: batch }),
+          body: safeJsonStringify({ events: batch }),
         });
       }
     } catch {
@@ -318,7 +318,7 @@ class MonitoringClient {
         await fetch("/api/analytics/errors", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ errors }),
+          body: safeJsonStringify({ errors }),
         });
       }
     } catch {
@@ -337,6 +337,24 @@ class MonitoringClient {
       if (e.message && (e.message.includes("ResizeObserver") || e.message.includes("websocket"))) {
         return;
       }
+      // Check for DOM element load errors (e.g. <img> or <video> fail to load)
+      if (e.target && typeof Element !== "undefined" && e.target instanceof Element && e.target !== window) {
+        const tag = e.target.tagName ? e.target.tagName.toLowerCase() : "resource";
+        const src = e.target.src || e.target.currentSrc || null;
+        this.trackError({
+          error_name: "ResourceLoadError",
+          message: `Failed to load <${tag}> resource: ${src || "unknown source"}`,
+          page: window.location.pathname,
+          source: "resource_load",
+          severity: "warning",
+          metadata: {
+            tagName: tag,
+            src: src ? String(src).slice(0, 300) : null,
+          },
+        });
+        return;
+      }
+
       this.trackError({
         error_name: e.error?.name || "UncaughtException",
         message: e.message || "Uncaught window error",
@@ -350,10 +368,26 @@ class MonitoringClient {
     // 2. Unhandled Promise Rejections
     window.addEventListener("unhandledrejection", (e) => {
       const reason = e.reason;
+      let msg = "Unhandled Promise Rejection";
+      let errName = "UnhandledPromiseRejection";
+      let stack = null;
+
+      if (reason instanceof Error) {
+        errName = reason.name;
+        msg = reason.message;
+        stack = reason.stack;
+      } else if (typeof reason === "string") {
+        msg = reason;
+      } else if (typeof Element !== "undefined" && reason instanceof Element) {
+        msg = `Promise rejected with <${reason.tagName?.toLowerCase() || "element"}> element`;
+      } else if (reason && typeof reason === "object") {
+        msg = reason.message || reason.detail || safeJsonStringify(reason);
+      }
+
       this.trackError({
-        error_name: reason?.name || "UnhandledPromiseRejection",
-        message: reason?.message || String(reason || "Unhandled Promise Rejection"),
-        stack: reason?.stack || null,
+        error_name: errName,
+        message: msg,
+        stack,
         page: window.location.pathname,
         source: "unhandled_promise",
         severity: "error",
@@ -364,7 +398,7 @@ class MonitoringClient {
     window.addEventListener("beforeunload", () => {
       if (this.eventQueue.length && navigator?.sendBeacon) {
         try {
-          navigator.sendBeacon("/api/analytics/events", JSON.stringify({ events: this.eventQueue }));
+          navigator.sendBeacon("/api/analytics/events", safeJsonStringify({ events: this.eventQueue }));
           this.eventQueue = [];
         } catch {
           // ignore

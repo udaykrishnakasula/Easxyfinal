@@ -1,0 +1,24 @@
+[
+  {
+    "id": "bk_1788927739132_728377da",
+    "filename": "easyx_backup_bk_1788927739132_728377da.json",
+    "timestamp": "2026-09-09T04:22:19.132Z",
+    "sizeBytes": 921384,
+    "recordCounts": {
+      "users": 17,
+      "wallets": 17,
+      "investments": 13,
+      "deposits": 13,
+      "withdrawals": 5,
+      "kyc_records": 5,
+      "referrals": 0,
+      "support_tickets": 1,
+      "notifications": 150
+    },
+    "sha256": "017b9b79f78051c3129ea9081cd4019c59c88adf28897cbd76c50e658852189b",
+    "type": "automated",
+    "status": "success",
+    "storageLocation": "/app/applet/.data/backups/easyx_backup_bk_1788927739132_728377da.json",
+    "retentionCategory": "daily"
+  }
+]

@@ -255,7 +255,7 @@ export const apiError = (error, fallback = "Something went wrong. Please try aga
     return fallback;
   }
   if (Array.isArray(data?.detail) && data.detail.length) {
-    const firstMsg = data.detail[0]?.msg || data.detail[0]?.message;
+    const firstMsg = data.detail?.[0]?.msg || data.detail?.[0]?.message;
     if (typeof firstMsg === "string" && !isSensitiveErrorMessage(firstMsg)) {
       return firstMsg;
     }

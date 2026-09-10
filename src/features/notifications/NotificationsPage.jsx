@@ -20,7 +20,17 @@ export default function NotificationsPage() {
   const markRead = useMarkNotificationRead();
   const markAllRead = useMarkAllNotificationsRead();
 
-  const hasUnread = (notifications || []).some((n) => !n.is_read);
+  const notifList = Array.isArray(notifications)
+    ? notifications
+    : Array.isArray(notifications?.notifications)
+    ? notifications.notifications
+    : Array.isArray(notifications?.data)
+    ? notifications.data
+    : typeof notifications === "string" && notifications.trim().startsWith("[")
+    ? (() => { try { const p = JSON.parse(notifications); return Array.isArray(p) ? p : []; } catch { return []; } })()
+    : [];
+
+  const hasUnread = notifList.some((n) => !n.is_read);
 
   return (
     <div data-testid="notifications-page">
@@ -44,7 +54,7 @@ export default function NotificationsPage() {
 
       {isLoading ? (
         <EasyXLoader />
-      ) : !notifications || notifications.length === 0 ? (
+      ) : notifList.length === 0 ? (
         <div className="mt-5">
           <EasyXEmptyState
             icon={Bell}
@@ -55,7 +65,7 @@ export default function NotificationsPage() {
       ) : (
         <EasyXCard className="mt-5 p-0 overflow-hidden">
           <div className="divide-y divide-white/5">
-            {notifications.map((n) => {
+            {notifList.map((n) => {
               const Icon = iconFor(n.type);
               return (
                 <div

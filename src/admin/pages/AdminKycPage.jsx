@@ -170,7 +170,7 @@ function DocPreview({ docId, label, onExpand }) {
   const handleImageDomError = (e) => {
     console.error(
       `[Admin KYC Image Error] Browser failed to decode/render image for docId: ${docId} (${label}). URL: ${url}`,
-      e
+      e?.target?.src || "image_decode_failed"
     );
     setErr(true);
   };
@@ -590,7 +590,7 @@ export default function AdminKycPage() {
                   color: "rose",
                   isDanger: true,
                   onClick: () => {
-                    setRejectReason(PRESET_REASONS[0]);
+                    setRejectReason(Array.isArray(PRESET_REASONS) && PRESET_REASONS[0] ? PRESET_REASONS[0] : "Documents unreadable or incomplete");
                     setModal({ type: "batch_reject" });
                   },
                 },

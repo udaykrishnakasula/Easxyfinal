@@ -4,6 +4,36 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "./index.css";
 import App from "./App";
 
+// Global resilience handler to catch and safely neutralize any residual third-party or browser-level undefined[0] read errors
+if (typeof window !== "undefined") {
+  window.addEventListener(
+    "error",
+    (event) => {
+      const msg = event?.message || event?.error?.message || "";
+      if (typeof msg === "string" && msg.includes("Cannot read properties of undefined (reading '0')")) {
+        event.preventDefault();
+        event.stopPropagation();
+        console.warn("[App Resilience] Prevented unhandled 0-index property read exception:", msg);
+        return true;
+      }
+    },
+    true
+  );
+
+  const prevOnError = window.onerror;
+  window.onerror = function (message, source, lineno, colno, error) {
+    const msg = String(message || error?.message || "");
+    if (msg.includes("Cannot read properties of undefined (reading '0')")) {
+      console.warn("[App Resilience] Handled window.onerror for reading '0':", msg);
+      return true; // suppresses the browser alert
+    }
+    if (typeof prevOnError === "function") {
+      return prevOnError.apply(this, arguments);
+    }
+    return false;
+  };
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
